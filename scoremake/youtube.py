@@ -27,6 +27,7 @@ AUDIO_FORMAT, AUDIO_SORT = "ba/b", "ext:m4a"
 # res는 짧은 변 기준이라 세로 영상도 제대로 고른다
 PREVIEW_FORMAT, PREVIEW_SORT = "bv*+ba/b", "res:240,ext:mp4:m4a"
 STALL = 60  # 이 시간(초) 동안 아무 출력이 없으면 멈춘 것으로 보고 끊는다
+FORBIDDEN_TRIES = 3  # 403(막힌 주소)이 나면 처음부터 다시 받아 보는 횟수
 
 KNOWN_ERRORS = [
     ("Private video", "비공개 영상이라 받을 수 없습니다."),
@@ -164,7 +165,21 @@ class Download:
         if "+" in fmt:
             args[-1:-1] = ["--merge-output-format", "mp4"]
         result = []
-        self._exec(args, folder, lambda line: (on_line(line), result.append(line)))
+        # 유튜브가 가끔 막힌 주소(403)를 준다. yt-dlp는 같은 주소로만 다시 시도하므로, 처음부터 다시 돌려 새 주소를 받는다
+        for attempt in range(FORBIDDEN_TRIES):
+            try:
+                self._exec(args, folder, lambda line: (on_line(line), result.append(line)))
+                break
+            except RuntimeError as e:
+                if "403" not in str(e) or self.cancelled:
+                    raise
+                if attempt == FORBIDDEN_TRIES - 1:
+                    raise RuntimeError("유튜브가 다운로드를 잠시 막았습니다(403). 잠시 뒤 다시 시도하세요.") from e
+                for name in os.listdir(folder):
+                    if name.startswith(vid + ".") and name.endswith((".part", ".ytdl")):
+                        os.remove(os.path.join(folder, name))
+                part[0] = 0
+                time.sleep(3)
         files = [n for n in os.listdir(folder) if n.startswith(vid + ".") and not n.endswith((".part", ".ytdl"))]
         if not files:
             raise RuntimeError(_error_text(b"\n".join(result[-40:])))

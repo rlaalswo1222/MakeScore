@@ -275,6 +275,7 @@ def write_pdf(path, pages, title):
     from svglib.svglib import svg2rlg
 
     font = _korean_font()
+    _register_svg_fonts()
     w, h = A4
     margin = 40
     pdf = canvas.Canvas(path, pagesize=A4)
@@ -299,6 +300,17 @@ def write_pdf(path, pages, title):
             pdf.drawCentredString(w / 2, 22, f"{i + 1} / {len(pages)}")
             pdf.showPage()
     pdf.save()
+
+
+def _register_svg_fonts():
+    """악보 SVG의 코드 이름 글꼴(♭·♯가 모두 있는 Segoe UI Symbol)을 PDF 변환기에 알려 준다. 없으면 기본 글꼴로 나온다."""
+    try:
+        from svglib.fonts import register_font
+        file = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts", "seguisym.ttf")
+        if os.path.exists(file):
+            register_font("Segoe UI Symbol", file)
+    except Exception:
+        traceback.print_exc()
 
 
 def _korean_font():
