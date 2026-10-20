@@ -138,7 +138,9 @@ function avgTempo(){
 }
 
 /* ---------- 분석: 박에 맞추기 → 마디 나누기 ---------- */
-const TPB = 12;                                   // 한 박 = 12틱 (2·3·4 분할 모두 정수)
+const TPB = 24;                                   // 한 박 = 24틱 (2·3·4·8 분할 모두 정수)
+const T8 = TPB/2, T16 = TPB/4, T32 = TPB/8, TR = TPB/3;   // 8분, 16분, 32분, 셋잇단 8분음표
+const gridTicks = () => S.grid*TPB/12;             // 설정값(가장 짧은 음표, 쉼표 채우기)은 1박 = 12 단위로 저장돼 있다
 const CHORD_TOGETHER = 0.05;                       // 이 시간(초) 안에 시작한 음은 함께 친 화음으로 본다
 const BPMEAS = {'4/4':4,'3/4':3,'2/4':2,'6/8':3};
 let A = null;
@@ -164,6 +166,10 @@ function findGraces(vis){
     for (let i=0; i<ns.length; i++){
       const g = ns[i];
       if (g.d > GRACE_DUR || g.noGrace || ids.has(g.id)) continue;
+      // 빠른 런의 중간 음은 꾸밈음이 아니다 (바로 앞에도 짧은 음이 가까운 음높이로 붙어 있다)
+      let k = i-1; while (k>=0 && ns[k].t > g.t-0.025) k--;
+      const pv = ns[k];
+      if (pv && g.t-pv.t <= GRACE_GAP && Math.abs(g.p-pv.p) <= GRACE_STEP && pv.d <= GRACE_DUR*1.5) continue;
       const beat = timeAt(beatPos(g.t)+1) - timeAt(beatPos(g.t));
       const maxGap = Math.min(GRACE_GAP, beat*0.2);   // 16분음표보다 확실히 빠른 것만
       const chain = [g]; let cur = g, found = null;
@@ -184,14 +190,14 @@ function findGraces(vis){
 }
 
 /* 양손 판정용: 음마다 악보에서 들어갈 박자 칸(g)을 붙인다 (같은 칸의 음은 한 화음으로 그려진다) */
-const slots = ns => ns.map(n => ({id:n.id, p:n.p, t:n.t, g:Math.round(beatPos(n.t)*TPB/S.grid)}));
+const slots = ns => ns.map(n => ({id:n.id, p:n.p, t:n.t, g:Math.round(beatPos(n.t)*TPB/gridTicks())}));
 
 function compute(){
   ENV = onsetEnvelope(); trackBeats();
   const vis = S.notes.filter(visible);
   AUTOHAND = S.handMode==='auto' && window.ScoreHands ? ScoreHands.assign(slots(vis), S.split) : new Map();
   GRACE = findGraces(vis);
-  const G = S.grid;
+  const G = gridTicks();
   // 함께 친 음(시작이 50ms 안)은 박자 칸에 맞추기 전에 한 묶음으로 만들어 같은 위치에 둔다.
   // 따로 맞추면 칸 경계 근처에서 한 음은 앞 칸, 다른 음은 뒤 칸으로 가서 화음이 쪼개진다.
   const onsetOf = new Map(), sorted = vis.filter(n => !GRACE.ids.has(n.id)).sort((a,b) => a.t-b.t);
@@ -203,31 +209,47 @@ function compute(){
   }
   const qs = sorted.map(n => {
     const tick = beatPos(onsetOf.get(n.id))*TPB, endTick = beatPos(soundingEnd(n))*TPB, keyUpTick = beatPos(n.t+n.d)*TPB;
-    return {n, h:handOf(n), tick, endTick, keyUpTick, playTick:beatPos(pedalEnd(n))*TPB, qS:Math.round(tick/G)*G, qT:Math.round(tick/4)*4, beat:Math.floor((tick+2)/TPB)};
+    return {n, h:handOf(n), tick, endTick, keyUpTick, playTick:beatPos(pedalEnd(n))*TPB, qS:Math.round(tick/G)*G, qT:Math.round(tick/TR)*TR, q32:Math.round(tick/T32)*T32, beat:Math.floor((tick+TPB/6)/TPB)};
   });
   const trip = {R:new Set(), L:new Set()};
-  if (S.triplet && G < 12){
+  if (S.triplet && G < TPB){
     for (const h of ['R','L']){
       const by = new Map();
       qs.forEach(q => { if (q.h!==h) return; if (!by.has(q.beat)) by.set(q.beat,[]); by.get(q.beat).push(q); });
       by.forEach((arr,b) => {
         // 셋잇단 자리(⅓, ⅔ 박)에 음이 두 개 이상 정확히 있고, 셋잇단으로 볼 때 오차가 절반 이하일 때만
-        const onTrip = arr.filter(q => { const r=((q.qT%12)+12)%12; return (r===4||r===8) && Math.abs(q.tick-q.qT)<1; }).length;
+        const onTrip = arr.filter(q => { const r=((q.qT%TPB)+TPB)%TPB; return (r===TR||r===2*TR) && Math.abs(q.tick-q.qT)<TPB/12; }).length;
         if (onTrip < 2) return;
         let eS=0, eT=0; arr.forEach(q => { eS+=Math.abs(q.tick-q.qS); eT+=Math.abs(q.tick-q.qT); });
         if (eT < eS*0.5) trip[h].add(b);
       });
     }
   }
-  const EG = keyLen() ? Math.max(G, 6) : G;         // 누른 길이대로 쓸 때는 음 끝을 8분음표 단위로 (자잘한 쉼표를 줄인다)
+  // 32분음표: 16분음표 칸에 따로 친 음이 몰리고, 32분음표 칸으로 나누면 더 갈라질 때만 그 박을 32분음표로 쓴다 (빠른 런)
+  const fast = {R:new Set(), L:new Set()};
+  if (G <= T16){
+    for (const h of ['R','L']){
+      const by = new Map();
+      qs.forEach(q => { if (q.h!==h) return; if (!by.has(q.beat)) by.set(q.beat,[]); by.get(q.beat).push(q); });
+      by.forEach((arr,b) => {
+        const cl = [...new Map(arr.map(q => [onsetOf.get(q.n.id), q])).values()];   // 따로 친 묶음마다 하나
+        const n16 = new Set(cl.map(q => q.qS)).size, n32 = new Set(cl.map(q => q.q32)).size;
+        if (n16 < cl.length && n32 > n16){ fast[h].add(b); trip[h].delete(b); }
+      });
+    }
+  }
+  const EG = keyLen() ? Math.max(G, T8) : G;         // 누른 길이대로 쓸 때는 음 끝을 8분음표 단위로 (자잘한 쉼표를 줄인다)
   qs.forEach(q => {
-    q.trip = trip[q.h].has(q.beat);
-    q.start = Math.max(0, q.trip ? q.qT : q.qS);
+    q.trip = trip[q.h].has(q.beat); q.fast = fast[q.h].has(q.beat);
+    q.start = Math.max(0, q.trip ? q.qT : q.fast ? q.q32 : q.qS);
     if (q.trip){
-      const e4 = Math.round(q.endTick/4)*4;
-      q.end = e4 <= (q.beat+1)*TPB ? Math.max(q.start+4, e4) : Math.max(q.start+4, Math.round(q.endTick/G)*G);
+      const e3 = Math.round(q.endTick/TR)*TR;
+      q.end = e3 <= (q.beat+1)*TPB ? Math.max(q.start+TR, e3) : Math.max(q.start+TR, Math.round(q.endTick/G)*G);
+    } else if (q.fast){
+      const e32 = Math.round(q.endTick/T32)*T32;
+      q.end = e32 <= (q.beat+1)*TPB ? Math.max(q.start+T32, e32) : Math.max(q.start+T32, Math.round(q.endTick/EG)*EG);
     } else q.end = Math.max(q.start+G, Math.round(q.endTick/EG)*EG);
-    q.keyUp = Math.max(q.start+G, Math.round(q.keyUpTick/G)*G);   // 페달과 상관없이 실제로 건반을 뗀 때
+    q.keyUp = Math.max(q.start+(q.fast ? T32 : G), Math.round(q.keyUpTick/G)*G);   // 페달과 상관없이 실제로 건반을 뗀 때
   });
 
   // 같은 손에서 따로 친 음(50ms 넘게 떨어짐)이 같은 칸에 몰리면 한 화음으로 붙어 버린다.
@@ -236,7 +258,7 @@ function compute(){
   for (const h of ['R','L']){
     const byOnset = new Map();
     qs.forEach(q => { if (q.h!==h) return; const k = onsetOf.get(q.n.id); if (!byOnset.has(k)) byOnset.set(k, []); byOnset.get(k).push(q); });
-    const cs = [...byOnset.entries()].sort((a,b) => a[0]-b[0]).map(([,g]) => ({g, tick:g[0].tick, start:g[0].start, step:g[0].trip ? 4 : G}));
+    const cs = [...byOnset.entries()].sort((a,b) => a[0]-b[0]).map(([,g]) => ({g, tick:g[0].tick, start:g[0].start, step:g[0].trip ? TR : g[0].fast ? T32 : G}));
     const move = (c, to) => { c.start = to; c.g.forEach(q => { q.start = to; q.end = Math.max(q.end, to+c.step); q.keyUp = Math.max(q.keyUp, to+c.step); }); };
     const ok = (c, to) => to >= 0 && Math.abs(c.tick-to) < c.step && (Math.floor(to/TPB)===Math.floor(c.start/TPB) || to%TPB===0);
     for (let i=1; i<cs.length; i++){
@@ -259,7 +281,7 @@ function compute(){
   // 같이 치고 같이 뗀 음은 한 화음으로 둔다 (그래야 성부가 엇갈리지 않는다).
   for (const h of ['R','L']){
     const mine = qs.filter(q => q.h===h);
-    const over = q => q.keyUp - q.start >= TPB ? mine.filter(o => o.start > q.start && o.start <= q.keyUp - 6) : [];
+    const over = q => q.keyUp - q.start >= TPB ? mine.filter(o => o.start > q.start && o.start <= q.keyUp - T8) : [];
     const side = new Map(), ovOf = new Map();
     mine.forEach(q => {
       q.v = 1;
@@ -295,7 +317,7 @@ function compute(){
   }
   const M = BPMEAS[S.ts]*TPB;
   const lastTick = Math.max(M, ...qs.map(q => q.end)), nMeas = Math.ceil(lastTick/M);
-  const ends = {}, fill = +S.fill || 6;           // 이 길이(틱) 이하의 빈틈은 앞 음을 늘려 채운다 (쉼표 채우기 설정)
+  const ends = {}, fill = (+S.fill || 6)*TPB/12;           // 이 길이(틱) 이하의 빈틈은 앞 음을 늘려 채운다 (쉼표 채우기 설정)
   for (const h of ['R','L']) ends[h] = {all:chordEnds(ch[h].all, trip[h], M, nMeas*M, fill), v1:chordEnds(ch[h].v1, trip[h], M, nMeas*M, fill), v2:chordEnds(ch[h].v2, trip[h], M, nMeas*M, fill)};
   const k = detectKey(), key = S.key==='auto' ? k.key : KEYS.find(x => x.id===S.key);
   const measures = [], clefNow = {R:'treble', L:'bass'};
@@ -327,7 +349,7 @@ function compute(){
     result.push({t, d:Math.max(0.05, timeAt(Math.max(q.end, q.playTick)/TPB)-t), p:q.n.p, v:q.n.v});
     (GRACE.main.get(q.n.id) || []).forEach(g => result.push({t:t-(q.n.t-g.t), d:g.d, p:g.p, v:g.v}));
   });
-  A = {trip, measures, M, crowd, auto:k, key, result: result.sort((a,b) => a.t-b.t)};
+  A = {trip, fast, measures, M, crowd, auto:k, key, result: result.sort((a,b) => a.t-b.t)};
 }
 
 /* 음을 오선 위치(온음 단위, C0 = 0)로 */
@@ -378,7 +400,7 @@ function graceAccidental(p, key){
 
 /* 한 성부의 화음마다 악보에 쓸 끝 틱. 마디선을 넘으면 다음 마디로 붙임줄로 이어진다 (Map: 화음 → 끝 틱) */
 function chordEnds(chs, trip, M, endTick, fill){
-  const snapEnd = e => (trip.has(Math.floor(e/TPB)) && e%TPB) ? Math.round(e/4)*4 : e;
+  const snapEnd = e => (trip.has(Math.floor(e/TPB)) && e%TPB) ? Math.round(e/TR)*TR : e;
   const ends = new Map();
   chs.forEach((c,i) => {
     const nxt = i+1<chs.length ? chs[i+1].start : endTick, bar = Math.min(nxt, (Math.floor(c.start/M)+1)*M);
@@ -387,9 +409,9 @@ function chordEnds(chs, trip, M, endTick, fill){
     else if (e < bar && bar-e <= fill) e = bar;  // 다음 음이 멀면 마디선까지만
     // 셋잇단 박 안에서 실제로 뗀 음은 페달·빈틈 채우기로 박을 넘겨 늘리지 않는다 (붙임줄 + 같은 음 재타건이 생긴다)
     const b0 = Math.floor(c.start/TPB);
-    if (trip.has(b0) && c.keyUp <= (b0+1)*TPB + 2) e = Math.min(e, (b0+1)*TPB);
+    if (trip.has(b0) && c.keyUp <= (b0+1)*TPB + TPB/6) e = Math.min(e, (b0+1)*TPB);
     e = snapEnd(e);
-    if (e <= c.start) e = Math.min(nxt, c.start + (trip.has(b0) ? 4 : 3));
+    if (e <= c.start) e = Math.min(nxt, c.start + (trip.has(b0) ? TR : T16));
     ends.set(c, Math.min(e, endTick));
   });
   return ends;
@@ -419,10 +441,10 @@ function buildItems(chs, ends, trip, m0, m1){
 }
 
 /* 한 항목을 그릴 음표 길이들로 쪼갠다: [{d:'qd', ticks, trip}] */
-const STRAIGHT = [[48,'w'],[36,'hd'],[24,'h'],[18,'qd'],[12,'q'],[9,'8d'],[6,'8'],[3,'16']];
+const STRAIGHT = [[96,'w'],[72,'hd'],[48,'h'],[36,'qd'],[24,'q'],[18,'8d'],[12,'8'],[9,'16d'],[6,'16'],[3,'32']];
 function pieces(it, trip){
-  const L = it.e-it.s, inTrip = trip.has(Math.floor(it.s/TPB)) && L<TPB && L%4===0, out=[];
-  if (inTrip){ let r=L; while (r>=8){ out.push({d:'q', ticks:8, trip:true}); r-=8; } while (r>=4){ out.push({d:'8', ticks:4, trip:true}); r-=4; } }
+  const L = it.e-it.s, inTrip = trip.has(Math.floor(it.s/TPB)) && L<TPB && L%TR===0, out=[];
+  if (inTrip){ let r=L; while (r>=2*TR){ out.push({d:'q', ticks:2*TR, trip:true}); r-=2*TR; } while (r>=TR){ out.push({d:'8', ticks:TR, trip:true}); r-=TR; } }
   else {
     const fill = r => { for (const [t,d] of STRAIGHT) while (r>=t){ out.push({d, ticks:t, trip:false}); r-=t; } };
     // 한 음표로 못 쓰는 길이면 박 경계에서 끊는다 (붙임줄이 박 경계에 오게)
@@ -692,7 +714,7 @@ function printPages(){
   return pages;
 }
 const xmlEsc = s => String(s).replace(/[<>&"']/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&apos;'}[c]));
-const XTYPE = {w:'whole',h:'half',q:'quarter','8':'eighth','16':'16th'};
+const XTYPE = {w:'whole',h:'half',q:'quarter','8':'eighth','16':'16th','32':'32nd'};
 function xmlPitch(p, flats){
   const name=(flats?VFL:VSH)[p%12], alter = name.length>1 ? (name[1]==='#'?1:-1) : 0;
   return `<pitch><step>${name[0].toUpperCase()}</step>${alter?`<alter>${alter}</alter>`:''}<octave>${Math.floor(p/12)-1}</octave></pitch>`;
@@ -1162,7 +1184,7 @@ function bindRoll(){
   roll.addEventListener('pointerup', endDrag); roll.addEventListener('pointercancel', endDrag);
   roll.addEventListener('dblclick', e => {
     const {x,y}=local(e); if (y<ROLL.ruler || y>rollH()-ROLL.pedal || hitNote(x,y)) return;
-    const bp = beatPos(x/S.zoom), step = S.grid/TPB, q = Math.round(bp/step)*step;
+    const bp = beatPos(x/S.zoom), step = gridTicks()/TPB, q = Math.round(bp/step)*step;
     const t = Math.max(0, timeAt(q)), d = Math.max(0.1, timeAt(q+1)-timeAt(q))*0.95;
     pushHist();
     const n={id:nid++, p:clamp(pOfY(y),ROLL.minP,ROLL.maxP), t:+t.toFixed(3), d:+d.toFixed(3), v:64, c:1, hand:null, ok:true};
@@ -1433,7 +1455,7 @@ window.__dev = {printPages, musicXml, ytRange:(a,b) => { ytSet('end',b); ytSet('
   // 함께 친 화음 중, 음을 하나씩 따로 박자 칸에 맞췄다면 쪼개졌을 화음 수
   wouldSplit:() => { const ns = S.notes.filter(visible).sort((a,b) => a.t-b.t); let n = 0;
     for (let i=0; i<ns.length;){ let j=i+1; while (j<ns.length && ns[j].t-ns[i].t < CHORD_TOGETHER) j++;
-      const pos = new Set(ns.slice(i,j).map(x => Math.round(beatPos(x.t)*TPB/S.grid))); if (pos.size>1) n++; i=j; } return n; },
+      const pos = new Set(ns.slice(i,j).map(x => Math.round(beatPos(x.t)*TPB/gridTicks()))); if (pos.size>1) n++; i=j; } return n; },
   // 입력(인식된 음)과 악보를 음 하나하나 대조해 이상한 곳을 센다 (점검용, 고치지 않음)
   audit:(nEx=5) => {
     const bm = BPMEAS[S.ts], mOf = t => Math.floor(beatPos(t)/bm)+1, nm = p => pitchName(p, A.key.flats);
@@ -1499,6 +1521,7 @@ window.__dev = {printPages, musicXml, ytRange:(a,b) => { ytSet('end',b); ytSet('
     const errMs = ins.filter(n => rec.has(n.id)).map(n => Math.abs(timeAt(rec.get(n.id).s/TPB) - n.t)*1000);
     R['박자 칸에 맞추며 옮긴 거리(ms)'] = `평균 ${Math.round(errMs.reduce((a,b)=>a+b,0)/errMs.length)}, 100ms 넘음 ${errMs.filter(x => x>100).length}개`;
     R['셋잇단으로 쓴 박'] = {오른손:A.trip.R.size, 왼손:A.trip.L.size};
+    R['32분음표로 쓴 박'] = {오른손:A.fast.R.size, 왼손:A.fast.L.size};
     R['두 성부 마디'] = A.measures.filter(m => m.R.voices.length>1 || m.L.voices.length>1).length;
     R['마디 중간 음자리표 변경'] = A.measures.filter(m => m.R.change || m.L.change).length;
     return JSON.stringify(R, null, 1);
