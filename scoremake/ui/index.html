@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ScoreMake</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<section id="start" class="screen">
+  <div class="start-card">
+    <span class="wordmark big">ScoreMake</span>
+    <p class="lead">피아노 연주 영상을 열면 소리를 듣고 악보로 바꿉니다.</p>
+    <button class="btn primary lg" id="openBtn">영상 열기</button>
+    <p class="hint">또는 파일을 이 창에 끌어다 놓으세요 · mp4, mov, mkv, mp3, wav 등</p>
+    <div class="or"><span>또는 유튜브에서</span></div>
+    <form class="yt-row" id="ytForm">
+      <input id="ytUrl" type="text" placeholder="유튜브 링크를 붙여 넣으세요" aria-label="유튜브 링크" autocomplete="off">
+      <button class="btn" id="ytGo" type="submit">불러오기</button>
+    </form>
+    <p class="err" id="ytErr" hidden></p>
+    <div class="recent" id="recent" hidden>
+      <h2>최근 작업</h2>
+      <ul id="recentList"></ul>
+    </div>
+  </div>
+</section>
+
+<section id="yt" class="screen" hidden>
+  <div class="yt-card">
+    <div class="yt-head">
+      <div><h1 id="ytTitle"></h1><p class="hint" id="ytMeta"></p></div>
+      <button class="btn" id="ytBack">처음으로</button>
+    </div>
+    <div class="yt-player"><div id="ytPlayerBox"></div><p class="yt-noplay" id="ytNoPlay" hidden></p></div>
+    <div class="range">
+      <div class="range-track" id="rangeTrack">
+        <div class="range-sel" id="rangeSel"></div><div class="range-now" id="rangeNow"></div>
+        <div class="knob" id="knobA" role="slider" tabindex="0" aria-label="시작 위치"></div>
+        <div class="knob" id="knobB" role="slider" tabindex="0" aria-label="끝 위치"></div>
+      </div>
+      <div class="range-fields">
+        <div class="tfield"><label for="ytStart">시작</label><input id="ytStart" class="mono"><button class="btn" id="setStart">지금 위치로</button></div>
+        <div class="tfield"><label for="ytEnd">끝</label><input id="ytEnd" class="mono"><button class="btn" id="setEnd">지금 위치로</button></div>
+        <button class="btn" id="previewSel">▶ 고른 구간 들어보기</button>
+        <span class="sel-len" id="selLen"></span>
+      </div>
+      <p class="hint">위 영상을 재생하다가 원하는 곳에서 '지금 위치로'를 누르거나, 막대의 두 손잡이를 끌거나, 시간을 직접 적으세요 (예: 1:05).</p>
+    </div>
+    <div class="yt-actions" id="ytActions">
+      <button class="btn primary lg" id="ytDownload">이 구간 받아서 악보 만들기</button>
+      <span class="hint">인식에 쓸 소리만 받아 '동영상\ScoreMake' 폴더에 저장합니다</span>
+    </div>
+    <div class="yt-progress" id="ytProg" hidden>
+      <div class="bar"><i id="ytBar"></i></div>
+      <span class="mono" id="ytProgText"></span>
+      <button class="btn" id="ytCancel">취소</button>
+    </div>
+    <p class="err" id="ytErr2" hidden></p>
+  </div>
+</section>
+
+<section id="working" class="screen" hidden>
+  <div class="start-card">
+    <span class="wordmark">ScoreMake</span>
+    <p class="lead" id="workName"></p>
+    <ol class="steps">
+      <li id="stModel">인식 엔진 준비</li>
+      <li id="stNotes">음 듣고 찾기 <span class="mono" id="pct"></span></li>
+      <li id="stScore">악보 만들기</li>
+    </ol>
+    <div class="bar"><i id="barFill"></i></div>
+    <p class="hint" id="workHint">그래픽카드 없이 CPU로 인식합니다. 3분짜리 곡이면 2분 정도 걸립니다.</p>
+    <p class="err" id="workErr" hidden></p>
+    <button class="btn" id="backBtn" hidden>처음으로</button>
+  </div>
+</section>
+
+<div id="editor" class="app" hidden>
+  <header class="appbar">
+    <span class="wordmark">ScoreMake</span>
+    <div class="file"><b id="fileName"></b><span class="dot"></span><span class="mono" id="fileLen"></span><span class="dot"></span><span class="done" id="fileInfo"></span></div>
+    <div class="appbar-actions">
+      <button class="btn" id="undo" disabled>되돌리기 <kbd>Ctrl Z</kbd></button>
+      <button class="btn" id="otherBtn">다른 영상 열기</button>
+    </div>
+  </header>
+
+  <div class="main">
+    <aside class="side">
+      <section class="card video-card">
+        <div class="video-box"><video id="media" preload="auto" playsinline></video><canvas id="kbd" hidden></canvas></div>
+      </section>
+
+      <section class="card settings">
+        <h2>악보 설정</h2>
+        <div class="field">
+          <div class="field-head"><label for="bpm">템포 (BPM)</label><button class="linkbtn" id="bpmAuto"></button></div>
+          <div class="row"><input type="range" id="bpm" min="40" max="200" step="1"><input type="number" id="bpmNum" min="40" max="200" aria-label="BPM"><button class="btn" id="tap">탭</button></div>
+          <p class="hint" id="tapInfo">음악에 맞춰 '탭'을 4번 이상 누르면 템포를 잽니다</p>
+          <label class="check"><input type="checkbox" id="follow"> 연주자의 템포 변화 따라가기</label>
+        </div>
+        <div class="field">
+          <div class="field-head"><span class="lbl">첫 박 위치</span><span class="mono" id="offsetVal"></span></div>
+          <p class="hint">피아노롤 맨 위의 빨간 깃발을 끌어 곡이 시작하는 박에 맞추세요</p>
+        </div>
+        <div class="field two">
+          <div><label for="ts">박자</label><select id="ts"><option>4/4</option><option>3/4</option><option>2/4</option><option>6/8</option></select></div>
+          <div><label for="key">조표</label><select id="key"></select></div>
+        </div>
+        <div class="field">
+          <label for="grid">가장 짧은 음표</label>
+          <select id="grid"><option value="12">4분음표</option><option value="6">8분음표</option><option value="3">16분음표</option></select>
+          <label class="check"><input type="checkbox" id="trip"> 셋잇단음표 허용</label>
+          <label for="noteLen">음 길이</label>
+          <select id="noteLen"><option value="key">누른 길이대로</option><option value="sound">페달로 울리는 만큼 길게</option></select>
+          <label for="fill" title="손을 떼고 다음 음까지 빈 시간이 이 길이 이하면 쉼표 대신 앞 음을 늘려 씁니다">쉼표 채우기</label>
+          <select id="fill"><option value="3">16분음표 이하</option><option value="6">8분음표 이하</option><option value="12">한 박 이하</option></select>
+          <label class="check"><input type="checkbox" id="graces"> 꾸밈음 찾아 작은 음표로 쓰기</label>
+          <label class="check"><input type="checkbox" id="voices"> 멜로디와 반주를 두 성부로 나눠 쓰기</label>
+        </div>
+        <div class="field">
+          <label for="handMode">양손 나누기</label>
+          <select id="handMode"><option value="auto">자동 (손 움직임 분석)</option><option value="line">경계선 하나로 나누기</option></select>
+          <p class="hint" id="handHint"></p>
+        </div>
+        <div class="field">
+          <div class="field-head"><label for="minVel">약한 음 숨기기</label><span class="mono" id="minVelInfo"></span></div>
+          <input type="range" id="minVel" min="0" max="80" step="1">
+          <p class="hint">잡음이나 잘못 들린 작은 소리를 악보에서 뺍니다</p>
+        </div>
+        <div class="field">
+          <div class="field-head"><label for="minConf">확인 필요 기준</label><span class="mono" id="minConfInfo"></span></div>
+          <input type="range" id="minConf" min="0" max="95" step="5">
+          <p class="hint">AI의 확신도가 이 값보다 낮은 음을 주황색으로 표시합니다</p>
+        </div>
+      </section>
+
+      <section class="card review">
+        <div class="review-head"><span class="pill warn" id="reviewCount"></span>
+          <div class="review-nav"><button class="btn" id="prevRev">‹ 이전</button><button class="btn" id="nextRev">다음 ›</button></div></div>
+        <p class="hint">AI가 확신하지 못한 음입니다. 하나씩 들어보고 맞으면 '맞음', 틀리면 음높이를 고치거나 지우세요.</p>
+      </section>
+
+      <button class="linkbtn reset" id="resetBtn">수정한 내용 모두 지우고 처음 인식 결과로 돌아가기</button>
+    </aside>
+
+    <section class="work">
+      <div class="card inspector" id="inspector"></div>
+
+      <section class="card roll-card">
+        <div class="panel-head">
+          <h2>피아노롤 <span class="sub">실제 연주 타이밍</span></h2>
+          <div class="legend"><span><i class="sw r"></i>오른손</span><span><i class="sw l"></i>왼손</span><span><i class="sw w"></i>확인 필요</span><span><i class="sw h"></i>숨긴 약한 음</span><span><i class="sw p"></i>페달</span></div>
+          <div class="zoom"><button class="btn icon" id="zoomOut" aria-label="축소">−</button><button class="btn icon" id="zoomIn" aria-label="확대">+</button></div>
+        </div>
+        <div class="roll-wrap"><canvas id="keys"></canvas><div class="roll-scroll" id="rollScroll"><div id="rollInner"><canvas id="roll"></canvas></div></div></div>
+        <p class="hint tips">클릭: 선택 · 끌기: 음 옮기기 · 빈 곳 더블클릭: 음 추가 · 점선 끌기: 양손 기준선 옮기기 · H: 선택한 음의 손 바꾸기 · 맨 위 눈금 클릭: 그 위치로 이동</p>
+      </section>
+
+      <section class="card score-card">
+        <div class="panel-head"><h2>악보 미리보기</h2><span class="score-meta mono" id="scoreMeta"></span></div>
+        <div class="paper"><div id="score"></div></div>
+        <p class="hint tips">음표를 누르면 피아노롤에서 선택되고, 마디를 누르면 그 마디로 재생 위치가 옮겨집니다.</p>
+      </section>
+    </section>
+  </div>
+
+  <footer class="transport">
+    <button class="play" id="play" aria-label="재생"><svg viewBox="0 0 16 16" id="playIcon"><path d="M4 2.5v11l9.5-5.5z"/></svg></button>
+    <span class="mono time" id="timeNow"></span>
+    <input type="range" id="seek" min="0" max="1000" value="0" aria-label="재생 위치">
+    <div class="seg-wrap">
+      <div class="seg-row">
+        <div class="seg" role="group" aria-label="들을 소리"><button id="srcRaw" aria-pressed="true">원본 소리</button><button id="srcRes" aria-pressed="false">인식 결과</button></div>
+        <div class="seg"><button id="clickBtn" aria-pressed="false" title="박마다 딸깍 소리 (M)">박 소리</button></div>
+      </div>
+      <span class="hint">재생 중에 바꿔 가며 비교하세요 · 박 소리로 박이 맞는지 들어 보세요 (M)</span>
+    </div>
+    <div class="vol">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 6h3l4-3.5v11L5 10H2z"/><path d="M11 5.2a4 4 0 0 1 0 5.6M12.8 3.4a6.5 6.5 0 0 1 0 9.2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+      <input type="range" id="vol" min="0" max="200" step="5" aria-label="볼륨">
+      <span class="mono" id="volVal"></span>
+    </div>
+    <div class="export"><button class="btn" id="exportXml">MusicXML 저장</button><button class="btn primary" id="exportPdf">PDF로 저장</button></div>
+  </footer>
+</div>
+
+<div class="toast" id="toast" role="status" hidden></div>
+<div id="printHost" aria-hidden="true"></div>
+
+<script src="vendor/vexflow.js"></script>
+<script src="hands.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
