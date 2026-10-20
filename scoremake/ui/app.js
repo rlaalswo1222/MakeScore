@@ -1553,7 +1553,8 @@ function show(id){ ['start','yt','working','editor'].forEach(s => $('#'+s).hidde
 async function loadRecent(){
   const items = await API.recent();
   $('#recent').hidden = !items.length;
-  $('#recentList').innerHTML = items.map((it,i) => `<li><button data-i="${i}"><span>${xmlEsc(it.name)}</span><span class="when">${new Date(it.when*1000).toLocaleString('ko-KR',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'})}</span></button></li>`).join('');
+  $('#recent h2').textContent = `작업 목록 (${items.length})`;
+  $('#recentList').innerHTML = items.map((it,i) => `<li><button data-i="${i}"><span title="${xmlEsc(it.name)}">${xmlEsc(it.name)}</span><span class="when">${new Date(it.when*1000).toLocaleString('ko-KR',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'})}</span></button></li>`).join('');
   $('#recentList').onclick = e => { const b=e.target.closest('button[data-i]'); if (b) openPath(items[+b.dataset.i].path); };
 }
 async function chooseAndOpen(){ const p = await API.choose_file(); if (p) openPath(p); }

@@ -90,7 +90,7 @@ class Api:
                 if path and os.path.isfile(path):
                     items.append({"path": path, "name": os.path.basename(path), "when": os.path.getmtime(full)})
         items.sort(key=lambda x: -x["when"])
-        return items[:6]
+        return items  # 저장된 작업 전부 (최근 것부터)
 
     def save_edits(self, path, edits):
         file = _project_file(path)
