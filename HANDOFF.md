@@ -20,7 +20,7 @@
 - Windows 11, Intel Core Ultra 5 225H, RAM 15GB, **NVIDIA GPU 없음**(Intel Arc 내장). 인식은 CPU로 한다.
 - Python 3.11 가상환경: `.venv` (Python 3.14도 설치돼 있으나 쓰지 않음).
 - ffmpeg 8.1(winget, PATH에 있음), Node.js v24(PATH에 있음, 유튜브 다운로드에 필요), Microsoft Edge(WebView2).
-- **git 저장소가 아니다.** 버전 관리가 없으니 큰 수정 전에 주의할 것. 필요하면 사용자에게 `git init`을 제안한다.
+- **git 저장소**: GitHub 비공개 저장소 `rlaalswo1222/MakeScore` (main). `.venv`, `build`, `dist`는 올리지 않음. 수정 후 커밋·푸시는 사용자가 요청할 때만
 
 ## 3. 핵심 결정
 | 항목 | 결정 | 이유 |
