@@ -14,6 +14,7 @@
     <p class="lead">피아노 연주 영상을 열면 소리를 듣고 악보로 바꿉니다.</p>
     <button class="btn primary lg" id="openBtn">영상 열기</button>
     <p class="hint">또는 파일을 이 창에 끌어다 놓으세요 · mp4, mov, mkv, mp3, wav 등</p>
+    <label class="check sep-opt"><input type="checkbox" id="sepStart"> 노래·드럼·베이스가 섞인 음원이면 피아노 소리만 걸러서 인식 <span class="hint">(곡 길이만큼 더 걸림)</span></label>
     <div class="or"><span>또는 유튜브에서</span></div>
     <form class="yt-row" id="ytForm">
       <input id="ytUrl" type="text" placeholder="유튜브 링크를 붙여 넣으세요" aria-label="유튜브 링크" autocomplete="off">
@@ -51,6 +52,7 @@
     <div class="yt-actions" id="ytActions">
       <button class="btn primary lg" id="ytDownload">이 구간 받아서 악보 만들기</button>
       <span class="hint">인식에 쓸 소리만 받아 '동영상\ScoreMake' 폴더에 저장합니다</span>
+      <label class="check sep-opt"><input type="checkbox" id="sepYt"> 노래·드럼·베이스가 섞인 음원이면 피아노 소리만 걸러서 인식 <span class="hint">(곡 길이만큼 더 걸림)</span></label>
     </div>
     <div class="yt-progress" id="ytProg" hidden>
       <div class="bar"><i id="ytBar"></i></div>
@@ -67,6 +69,7 @@
     <p class="lead" id="workName"></p>
     <ol class="steps">
       <li id="stModel">인식 엔진 준비</li>
+      <li id="stSep" hidden>노래·드럼·베이스 걸러 내기 <span class="mono" id="sepPct"></span></li>
       <li id="stNotes">음 듣고 찾기 <span class="mono" id="pct"></span></li>
       <li id="stScore">악보 만들기</li>
     </ol>
@@ -83,6 +86,7 @@
     <div class="file"><b id="fileName"></b><span class="dot"></span><span class="mono" id="fileLen"></span><span class="dot"></span><span class="done" id="fileInfo"></span></div>
     <div class="appbar-actions">
       <button class="btn" id="undo" disabled>되돌리기 <kbd>Ctrl Z</kbd></button>
+      <button class="btn" id="rerunBtn" title="노래·드럼·베이스를 걸러 내고(또는 걸러 내지 않고) 처음부터 다시 인식합니다. 악보 설정은 그대로 둡니다"></button>
       <button class="btn" id="otherBtn">다른 영상 열기</button>
     </div>
   </header>

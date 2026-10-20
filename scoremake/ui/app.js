@@ -275,9 +275,11 @@ function compute(){
   const G = gridTicks();
   // 함께 친 음(시작이 50ms 안)은 박자 칸에 맞추기 전에 한 묶음으로 만들어 같은 위치에 둔다.
   // 따로 맞추면 칸 경계 근처에서 한 음은 앞 칸, 다른 음은 뒤 칸으로 가서 화음이 쪼개진다.
+  // 다만 같은 손이 반음·온음 옆 음을 20ms 넘게 떨어져 짧게(0.15초 미만) 친 것은 빠른 런이지 화음이 아니다 (2도가 섞인 화음은 길게 누른다)
   const onsetOf = new Map(), sorted = vis.filter(n => !GRACE.ids.has(n.id)).sort((a,b) => a.t-b.t);
+  const stepAfter = (grp, n) => n.d < 0.15 && grp.some(m => handOf(m)===handOf(n) && Math.abs(m.p-n.p) <= 2 && n.t-m.t > 0.02 && m.d < 0.15);
   for (let i=0; i<sorted.length;){
-    let j = i+1; while (j<sorted.length && sorted[j].t - sorted[i].t < CHORD_TOGETHER) j++;
+    let j = i+1; while (j<sorted.length && sorted[j].t - sorted[i].t < CHORD_TOGETHER && !stepAfter(sorted.slice(i,j), sorted[j])) j++;
     const group = sorted.slice(i, j), t = group.reduce((s,n) => s+n.t, 0)/group.length;
     group.forEach(n => onsetOf.set(n.id, t));
     i = j;
@@ -353,6 +355,49 @@ function compute(){
       const costB = bTo < next && ok(b, bTo) ? Math.abs(b.tick-bTo) : Infinity;
       if (costA === Infinity && costB === Infinity){ crowd.after++; crowd.left.push({h, start:b.start, gap:b.g[0].n.t - a.g[0].n.t}); continue; }
       if (costA < costB) move(a, aTo); else move(b, bTo);
+    }
+  }
+
+  // 빠른 런: 한 손이 단음(또는 두 음)으로 0.3박 안 간격으로 4번 넘게 이어 치는데 칸이 겹치거나 순서가 뒤집히면,
+  // 런 전체를 32분음표 칸에 순서대로 한 칸씩 다시 놓는다 (옮기는 거리 합이 가장 작게, 동적계획법). 리듬은 근사지만 음이 쌓이지 않는다
+  if (G <= T16) for (const h of ['R','L']){
+    const byOnset = new Map();
+    qs.forEach(q => { if (q.h!==h) return; const k = onsetOf.get(q.n.id); if (!byOnset.has(k)) byOnset.set(k, []); byOnset.get(k).push(q); });
+    const cs = [...byOnset.entries()].sort((a,b) => a[0]-b[0]).map(([,g]) => ({g, tick:g[0].tick, start:g[0].start}));
+    for (let i=0; i<cs.length;){
+      let j = i+1;
+      while (j<cs.length && cs[j].g.length<=2 && cs[j-1].g.length<=2 && cs[j].tick-cs[j-1].tick <= TPB*0.3) j++;
+      const run = cs.slice(i, j); i = j;
+      if (run.length < 4 || run.every((c,k) => !k || c.start > run[k-1].start)) continue;
+      // 칸 후보: 제자리 32분음표 칸에서 -2~+3칸. 앞 음보다 반드시 뒤 칸. 거리는 제곱으로 따져 오차를 여러 음에 고르게 나눈다
+      const OPTS = [-2,-1,0,1,2,3], cand = run.map(c => OPTS.map(d => (Math.round(c.tick/T32)+d)*T32));
+      const err = (c, s) => (c.tick-s)**2;
+      let prev = cand[0].map(s => ({cost:err(run[0], s), from:-1}));
+      const table = [prev];
+      for (let k=1; k<run.length; k++){
+        const cur = cand[k].map(s => {
+          let best = {cost:Infinity, from:-1};
+          prev.forEach((p,pi) => { if (p.cost < best.cost && cand[k-1][pi] < s) best = {cost:p.cost, from:pi}; });
+          return {cost:best.cost + err(run[k], s), from:best.from};
+        });
+        table.push(cur); prev = cur;
+      }
+      let pi = prev.reduce((b,p,x) => p.cost < prev[b].cost ? x : b, 0);
+      if (!isFinite(prev[pi].cost)) continue;
+      for (let k=run.length-1; k>=0; k--){
+        const s0 = cand[k][pi];
+        run[k].g.forEach(q => {
+          q.start = Math.max(0, s0); q.beat = Math.floor(q.start/TPB); q.trip = false; q.fast = true;
+          q.end = Math.max(q.start+T32, Math.round(q.endTick/T32)*T32); q.keyUp = Math.max(q.start+T32, Math.round(q.keyUpTick/T32)*T32);
+        });
+        pi = table[k][pi].from;
+      }
+      // 런이 지나간 박은 32분음표 박으로. 같은 손의 다른 음도 그 박에서는 32분음표 칸에 다시 맞춘다
+      const beats = new Set(run.flatMap(c => c.g.map(q => q.beat)));
+      beats.forEach(b => { fast[h].add(b); trip[h].delete(b); six[h].delete(b); });
+      qs.forEach(q => { if (q.h===h && !q.fast && beats.has(Math.floor(q.start/TPB))){
+        q.start = q.q32; q.beat = Math.floor(q.start/TPB); q.trip = false; q.fast = true;
+        q.end = Math.max(q.start+T32, Math.round(q.endTick/T32)*T32); q.keyUp = Math.max(q.start+T32, q.keyUp); } });
     }
   }
 
@@ -710,7 +755,7 @@ function drawScore(box, W, meas, maxPer){
   const ctx = r.getContext();
   const lay = [], hits = [];
   let carry = null;                                // 앞 마디에서 다음 마디로 이어지는 음표들 {i, R:[], L:[]}
-  let chordEndX = -1e9;                            // 같은 줄에서 앞 코드 이름이 끝난 자리 (겹치지 않게)
+  let chordEndX = -1e9, lineChords = [], lineTop = Infinity;   // 같은 줄의 코드 이름들: 줄을 다 그린 뒤 가장 높은 음표 바로 위에 한 줄로 쓴다
   lines.forEach((line, sys) => {
     const heads = line.map((e,k) => headOf(e.m, k===0));
     const sumNeed = line.reduce((s,e) => s+e.need, 0), free = usable - heads.reduce((s,h) => s+h, 0);
@@ -744,17 +789,28 @@ function drawScore(box, W, meas, maxPer){
   }
 
   // 코드 이름: 그 박에 시작하는 음표 위치에, 음표가 없으면 앞뒤 음표 사이를 박자 비례로 나눈 위치에
-  function chordMarks(i, vR, vL, sT, yC, col){
-    if (col===0) chordEndX = -1e9;
+  function chordMarks(i, vR, vL, sT, yC, col, lineEnd){
+    if (col===0){ chordEndX = -1e9; lineChords = []; lineTop = Infinity; }
+    // 이 마디에서 가장 높이 올라간 것 (음표·기둥·셋잇단 괄호, 오선 맨 윗줄)
+    let top = sT.getYForLine(0) - 6;
+    for (const v of vR){
+      for (const a of v.at){ try { top = Math.min(top, a.sn.getBoundingBox().getY()); } catch(e){} }
+      if (v.tuplets.length) top -= 22;
+    }
+    lineTop = Math.min(lineTop, top);
     const m0 = i*A.M, m1 = m0+A.M, cs = A.chords.filter(c => c.tick>=m0 && c.tick<m1);
-    if (!cs.length) return;
+    if (cs.length){
     const pts = [...vR, ...vL].flatMap(v => v.at).map(a => ({tick:a.tick, x:a.sn.getAbsoluteX()})).sort((a,b) => a.tick-b.tick);
     pts.push({tick:m1, x:sT.getNoteEndX()});
     const xAt = t => { const k = pts.findIndex(p => p.tick >= t), b = pts[k], a = k>0 ? pts[k-1] : {tick:m0, x:sT.getNoteStartX()};
       return b.tick===t || b.tick===a.tick ? b.x : a.x + (b.x-a.x)*(t-a.tick)/(b.tick-a.tick); };
-    ctx.save(); ctx.setFont(CHORD_FONT, 15); ctx.setFillStyle(PLAIN ? '#000000' : ink('--paper-ink') || '#000000');
     for (const c of cs){ const label = chordName(c, A.key.flats); const px = Math.max(xAt(c.tick) - 2, chordEndX + 8);
-      ctx.fillText(label, px, yC); chordEndX = px + label.length*10.5; }   // 15px 글꼴 기준 글자 폭 어림 (PDF에서 더 넓게 찍혀 넉넉히)
+      lineChords.push({label, px}); chordEndX = px + label.length*10.5; }   // 15px 글꼴 기준 글자 폭 어림 (PDF에서 더 넓게 찍혀 넉넉히)
+    }
+    if (!lineEnd || !lineChords.length) return;
+    const y = Math.max(yC, lineTop - 12);    // 줄 위 코드 자리보다 위로는 올리지 않는다
+    ctx.save(); ctx.setFont(CHORD_FONT, 15); ctx.setFillStyle(PLAIN ? '#000000' : ink('--paper-ink') || '#000000');
+    lineChords.forEach(l => ctx.fillText(l.label, l.px, y));
     ctx.restore();
   }
 
@@ -783,7 +839,7 @@ function drawScore(box, W, meas, maxPer){
       v.hits.forEach(({sn,c}) => { try { const bb=sn.getBoundingBox(); hits.push({x:bb.getX(), y:bb.getY(), w:bb.getW(), h:bb.getH(), c}); } catch(e){} });
     });
     crossTies(i, vR, vL, col, lineEnd);
-    try { chordMarks(i, vR, vL, sT, yC, col); } catch(e){ console.error(e); }
+    try { chordMarks(i, vR, vL, sT, yC, col, lineEnd); } catch(e){ console.error(e); }
     lay.push({i, x, y:yT+26, w, h:(yB+86)-(yT+26)});
   }
 }
@@ -1261,6 +1317,9 @@ function bindControls(){
   $('#srcRes').addEventListener('click', () => setSource('res'));
   $('#clickBtn').addEventListener('click', () => setClick(!clickOn));
   $('#otherBtn').addEventListener('click', chooseAndOpen);
+  $('#rerunBtn').addEventListener('click', rerun);
+  $('#sepStart').addEventListener('change', e => setSeparate(e.target.checked));
+  $('#sepYt').addEventListener('change', e => setSeparate(e.target.checked));
   $('#resetBtn').addEventListener('click', resetEdits);
   $('#exportXml').addEventListener('click', async () => {
     const path = await API.save_musicxml(musicXml(), baseName()+'.musicxml');
@@ -1507,24 +1566,50 @@ async function openPath(path){
   const m=media(); delete m.dataset.proxy; m.src=info.media;
   m.hidden=!info.isVideo; $('#kbd').hidden=info.isVideo;
   if (info.result){ startEditor(info.result, info.edits); return; }
-  show('working'); $('#workName').textContent=info.name;
-  $('#workErr').hidden=true; $('#backBtn').hidden=true; setStep('model'); $('#barFill').style.width='0%'; $('#pct').textContent='';
-  API.transcribe(path);
+  startWork(info.name, SEPARATE);
+  API.transcribe(path, SEPARATE);
 }
 window.openPath = openPath;
 
+/* 음원 분리: 사용자가 고를 때만. 시작·유튜브 화면의 선택 칸은 같은 값이고 기억해 둔다 */
+let SEPARATE = false, WORK_SEP = false, RERUN = null;
+function setSeparate(on, save=true){
+  SEPARATE = !!on; $('#sepStart').checked = SEPARATE; $('#sepYt').checked = SEPARATE;
+  if (save && API && API.set_pref) API.set_pref('separate', SEPARATE);
+}
+function startWork(name, separate){
+  WORK_SEP = separate;
+  show('working'); $('#workName').textContent=name; $('#stSep').hidden=!separate;
+  $('#workHint').textContent = separate ? '그래픽카드 없이 CPU로 처리합니다. 걸러 내기와 인식에 각각 곡 길이 정도 걸립니다. 처음 한 번은 분리 모델(약 80MB)을 받습니다.'
+                                        : '그래픽카드 없이 CPU로 인식합니다. 3분짜리 곡이면 2분 정도 걸립니다.';
+  $('#workErr').hidden=true; $('#backBtn').hidden=true; setStep('model'); $('#barFill').style.width='0%'; $('#pct').textContent=''; $('#sepPct').textContent='';
+}
+// 편집 화면에서 분리를 바꿔 다시 인식한다. 악보 설정(박, 첫 박, 조표 등)은 그대로 둔다
+function rerun(){
+  if (!S.path || !S.result) return;
+  if (playing) pause();
+  RERUN = Object.fromEntries(SETTINGS.map(k => [k, S[k]]));
+  const sep = !S.result.separated;
+  startWork(S.name, sep);
+  API.transcribe(S.path, sep);
+}
+
 function setStep(stage){
-  const order=['model','notes','score'], ids={model:'stModel', notes:'stNotes', score:'stScore'}, k=order.indexOf(stage);
+  const order=['model','separate','notes','score'], ids={model:'stModel', separate:'stSep', notes:'stNotes', score:'stScore'}, k=order.indexOf(stage);
   order.forEach((s,i) => { const el=$('#'+ids[s]); el.className = i<k ? 'ok' : i===k ? 'now' : ''; });
 }
 window.onEngine = (kind, data) => {
   if (kind.startsWith('yt_')){ ytEvent(kind, data); return; }
   if (kind==='progress'){
     setStep(data.stage);
-    if (data.stage==='notes'){ $('#pct').textContent=Math.round(data.f*100)+'%'; $('#barFill').style.width=(5+data.f*90)+'%'; }
+    if (data.stage==='separate'){ $('#sepPct').textContent=Math.round(data.f*100)+'%'; $('#barFill').style.width=(5+data.f*45)+'%'; }
+    if (data.stage==='notes'){ $('#pct').textContent=Math.round(data.f*100)+'%'; $('#barFill').style.width=(WORK_SEP ? 50+data.f*45 : 5+data.f*90)+'%'; }
   } else if (kind==='done'){
     setStep('score'); $('#barFill').style.width='100%';
-    setTimeout(() => startEditor(data, null), 30);
+    setTimeout(() => {
+      startEditor(data, null);
+      if (RERUN){ Object.assign(S, RERUN); RERUN = null; syncControls(); update(); }
+    }, 30);
   } else if (kind==='error'){
     $('#workErr').textContent='인식하지 못했습니다.\n'+data; $('#workErr').hidden=false; $('#backBtn').hidden=false;
   }
@@ -1538,7 +1623,8 @@ function startEditor(result, edits){
   const ps=S.notes.map(n=>n.p);
   ROLL.minP = clamp(Math.min(48, ...ps)-3, 21, 60); ROLL.maxP = clamp(Math.max(84, ...ps)+3, 72, 108);
   $('#fileName').textContent=S.name; $('#fileLen').textContent=fmtT(S.duration);
-  $('#fileInfo').textContent = `음 ${result.notes.length}개 인식` + (result.seconds ? ` · ${result.seconds}초 걸림` : '');
+  $('#fileInfo').textContent = `음 ${result.notes.length}개 인식` + (result.separated ? ' · 노래·드럼·베이스 걸러 냄' : '') + (result.seconds ? ` · ${result.seconds}초 걸림` : '');
+  $('#rerunBtn').textContent = result.separated ? '걸러 내지 않고 다시 인식' : '노래·드럼 걸러 내고 다시 인식';
   show('editor'); syncControls(); update();
   if (!result.notes.length) toast('피아노 음을 찾지 못했습니다. 피아노 소리가 있는 구간인지 확인하세요.');
   try { renderScore(); } catch(e){ console.error(e); }
@@ -1681,6 +1767,7 @@ function init(api){
   loadPiano();
   setVolume(1, false);
   if (API.get_pref) API.get_pref('volume').then(v => { if (typeof v === 'number') setVolume(v, false); });
+  if (API.get_pref) API.get_pref('separate').then(v => setSeparate(v === true, false));
   $('#openBtn').addEventListener('click', chooseAndOpen);
   $('#backBtn').addEventListener('click', () => { show('start'); loadRecent(); });
   let rw=0; new ResizeObserver(() => { dirty=true; const w=$('#score').clientWidth; if (A && Math.abs(w-rw)>4){ rw=w; scheduleScore(); } }).observe(document.body);

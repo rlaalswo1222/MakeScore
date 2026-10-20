@@ -117,29 +117,36 @@ class Api:
         return True
 
     # ---------- 음 인식 ----------
-    def transcribe(self, path):
+    def transcribe(self, path, separate=False):
+        """separate: 인식 전에 음원 분리로 노래·드럼·베이스를 걸러 낸다 (사용자가 고를 때만)"""
         if self._busy:
             return False
         self._busy = True
-        threading.Thread(target=self._transcribe, args=(path,), daemon=True).start()
+        threading.Thread(target=self._transcribe, args=(path, bool(separate)), daemon=True).start()
         return True
 
-    def _transcribe(self, path):
+    def _transcribe(self, path, separate=False):
         try:
             self._emit("progress", {"stage": "model", "f": 0})
             if self._engine is None:
                 from .engine import Engine  # torch는 무거워서 처음 인식할 때 불러온다
                 self._engine = Engine()
-            self._emit("progress", {"stage": "notes", "f": 0})
-            last = [0.0]
 
-            def progress(f):
-                if f - last[0] >= 0.01 or f >= 1:
-                    last[0] = f
-                    self._emit("progress", {"stage": "notes", "f": f})
+            def reporter(stage):
+                last = [-1.0]
 
+                def progress(f):
+                    if f - last[0] >= 0.01 or f >= 1:
+                        last[0] = f
+                        self._emit("progress", {"stage": stage, "f": f})
+                return progress
+
+            if separate:
+                self._emit("progress", {"stage": "separate", "f": 0})
             started = time.time()
-            result = self._engine.transcribe(path, progress=progress)
+            notes_progress = reporter("notes")
+            result = self._engine.transcribe(path, progress=notes_progress, separate=separate,
+                                             sep_progress=reporter("separate"))
             result["seconds"] = round(time.time() - started, 1)
             _write_json(_project_file(path), {"path": path, "result": result})
             self._emit("done", result)

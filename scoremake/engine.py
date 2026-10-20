@@ -18,6 +18,7 @@ from .ffmpeg import NO_WINDOW, find_ffmpeg
 
 PRETRAINED = os.path.join(os.path.dirname(transkun.__file__), "pretrained")
 ONSET_WINDOW = 2  # 확신도 계산 시 시작 프레임 앞뒤로 허용하는 프레임 수 (1프레임 ≈ 23ms)
+SEPARATOR = "htdemucs"  # 음원 분리: Demucs 4트랙(드럼·베이스·나머지·보컬). 처음 쓸 때 약 80MB를 받는다
 
 
 def extract_audio(path, fs):
@@ -46,6 +47,7 @@ class Engine:
         self.device = device
         self.frame_dur = model.hopSize / model.fs
         self._crf = None
+        self._separator = None
         self._progress = None
         self._done = 0
         self._total = 1
@@ -87,14 +89,45 @@ class Engine:
                 lo, hi = max(f - k, 0), min(f + k + 1, n_frames)
                 n.conf = float(min(1.0, (cum[hi, track] - cum[lo, track]).item()))
 
-    def transcribe(self, path, progress=None):
-        """path의 소리를 인식해 {duration, notes, pedals}를 돌려준다.
+    def separate(self, audio, fs, progress=None):
+        """노래·드럼·베이스를 걸러 내고 나머지 트랙(피아노가 들어 있는 쪽)만 돌려준다. audio: [샘플, 2]"""
+        from demucs.apply import apply_model
+        from demucs.pretrained import get_model
+        if self._separator is None:
+            self._separator = get_model(SEPARATOR).to(self.device)
+            self._separator.eval()
+        model = self._separator
+        if model.samplerate != fs:
+            raise RuntimeError(f"음원 분리 모델의 샘플링 주파수({model.samplerate})가 인식 엔진({fs})과 다릅니다.")
+        x = torch.from_numpy(audio.T.copy()).to(self.device)
+        ref = x.mean(0)
+        mean, std = ref.mean(), ref.std() + 1e-8
+        inner = model.models[0] if hasattr(model, "models") else model  # 여러 모델 묶음이면 첫 모델의 구간 길이
+        seg, n = int(float(inner.segment) * model.samplerate), x.shape[-1]
 
+        def on_chunk(d):
+            if progress and d.get("state") == "end":
+                done = d.get("model_idx_in_bag", 0) + min(1.0, (d["segment_offset"] + seg) / n)
+                progress(min(1.0, done / max(1, d.get("models", 1))))
+
+        out = apply_model(model, ((x - mean) / std)[None], shifts=0, split=True, overlap=0.25,
+                          device=self.device, callback=on_chunk)[0]
+        other = out[model.sources.index("other")] * std + mean
+        return other.T.contiguous().cpu().numpy()
+
+    def transcribe(self, path, progress=None, separate=False, sep_progress=None):
+        """path의 소리를 인식해 {duration, notes, pedals, separated}를 돌려준다.
+
+        separate: 먼저 음원 분리로 노래·드럼·베이스를 걸러 낸다 (사용자가 고를 때만, 느림)
         notes: [{p: MIDI 음높이, t: 시작(초), d: 길이(초), v: 세기 0~127, c: 확신도 0~1}]
         pedals: [{type: 'sustain'|'sostenuto'|'soft', t, d}]
         """
         model = self.model
         audio = extract_audio(path, model.fs)
+        if separate:
+            audio = self.separate(audio, model.fs, sep_progress)
+        if progress:
+            progress(0.0)
         x = torch.from_numpy(audio.copy()).to(self.device)
 
         # Transkun.transcribe의 구간 나누기와 같은 계산으로 전체 구간 수를 미리 구한다
@@ -118,4 +151,4 @@ class Engine:
                 pedals.append({"type": pedal_names.get(-n.pitch, str(-n.pitch)), "t": t, "d": d})
         notes.sort(key=lambda n: (n["t"], n["p"]))
         pedals.sort(key=lambda e: e["t"])
-        return {"duration": round(len(audio) / model.fs, 3), "notes": notes, "pedals": pedals}
+        return {"duration": round(len(audio) / model.fs, 3), "notes": notes, "pedals": pedals, "separated": bool(separate)}
