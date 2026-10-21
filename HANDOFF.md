@@ -30,7 +30,7 @@
 | 화면 | HTML/JS + **pywebview**(WebView2) 창, 로컬 HTTP 서버 | 영상 탐색(Range)과 악보 렌더링 |
 | 악보 렌더링 | **VexFlow 4.2.2** (`ui/vendor/vexflow.js`에 포함) | 오프라인 동작 |
 | PDF | VexFlow SVG → svglib/reportlab, 한글은 맑은 고딕 | |
-| 재생음 | **Salamander Grand Piano** 샘플 30개(단3도 간격, CC-BY 3.0) | `ui/vendor/piano/` |
+| 재생음 | 재생 막대의 '음색' 선택 (prefs `tone`, 기본 그랜드): **그랜드** FluidR3 GM 88건반 mp3(MIT) / **로즈** jRhodes3d 세기 2층(CC BY-NC, 비상업) / **그랜드 2** Salamander 30개(CC-BY 3.0) | 사용자가 10가지를 들어 보고 FluidR3 그랜드와 jRhodes를 골랐음 (2026-10-21) |
 | 유튜브 | **yt-dlp 공식 exe**를 `%LOCALAPPDATA%\ScoreMake\bin`에 받아 이틀마다 `-U` | exe에 넣으면 유튜브 변경에 못 따라감 |
 
 ## 4. 파일 구조
@@ -48,7 +48,7 @@ ScoreMake/
       index.html, style.css
       app.js              화면 로직 전부 (악보 계산·그리기·재생·내보내기) ← 대부분의 작업은 여기
       hands.js            양손 자동 나누기 (동적계획법), node로도 시험 가능
-      vendor/vexflow.js, vendor/piano/*.mp3
+      vendor/vexflow.js, vendor/piano/*.mp3 (Salamander), vendor/tones/grand|rhodes/*.mp3 (음색, 출처는 각 README.txt)
   tools/
     smoke_test.py         합성음 테스트 곡으로 엔진 정확도 측정 (정답 비교)
     test_hands.js         양손 나누기 정확도 (node)

@@ -87,6 +87,7 @@
     <div class="appbar-actions">
       <button class="btn" id="undo" disabled>되돌리기 <kbd>Ctrl Z</kbd></button>
       <button class="btn" id="rerunBtn" title="노래·드럼·베이스를 걸러 내고(또는 걸러 내지 않고) 처음부터 다시 인식합니다. 악보 설정은 그대로 둡니다"></button>
+      <button class="btn" id="homeBtn" title="처음 화면의 작업 목록으로 돌아갑니다 (고친 내용은 저장됩니다)">작업 목록</button>
       <button class="btn" id="otherBtn">다른 영상 열기</button>
     </div>
   </header>
@@ -180,6 +181,7 @@
       <div class="seg-row">
         <div class="seg" role="group" aria-label="들을 소리"><button id="srcRaw" aria-pressed="true">원본 소리</button><button id="srcRes" aria-pressed="false">인식 결과</button></div>
         <div class="seg"><button id="clickBtn" aria-pressed="false" title="박마다 딸깍 소리 (M)">박 소리</button></div>
+        <select id="tone" class="tone-sel" title="인식 결과를 재생할 때 쓰는 소리"><option value="grand">그랜드</option><option value="rhodes">로즈 (EP)</option><option value="salamander">그랜드 2</option></select>
       </div>
       <span class="hint">재생 중에 바꿔 가며 비교하세요 · 박 소리로 박이 맞는지 들어 보세요 (M)</span>
     </div>

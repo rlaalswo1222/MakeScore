@@ -1101,23 +1101,34 @@ function setVolume(v, save=true){
 }
 function ensureAudio(){ audioCtx(); if (actx.state==='suspended') actx.resume(); }
 
-/* 피아노 소리: Salamander Grand Piano 샘플(단3도 간격 30개)에서 가장 가까운 것을 음높이만큼 늘이거나 줄여 쓴다 */
-const PIANO = new Map(); let pianoLoading = null;
-function loadPiano(){
-  if (pianoLoading) return pianoLoading;
-  const ctx = audioCtx(), names = {0:'C',3:'Ds',6:'Fs',9:'A'}, jobs = [];
-  for (let m=21; m<=108; m+=3){
-    const file = `vendor/piano/${names[m%12]}${Math.floor(m/12)-1}.mp3`;
-    jobs.push(fetch(file).then(r => r.arrayBuffer()).then(b => ctx.decodeAudioData(b)).then(buf => PIANO.set(m, buf)).catch(() => {}));
-  }
-  return pianoLoading = Promise.all(jobs);
+/* 재생 음색: 샘플 묶음에서 가장 가까운 음을 음높이만큼 늘이거나 줄여 쓴다. 세기 층이 둘이면 센 음은 센 샘플로.
+ * bright: 세기에 따라 밝기를 바꾸는 필터 (세기 층이 있는 로즈는 층이 음색을 바꾸므로 약하게) */
+const range = (a, b, step=1) => Array.from({length:Math.floor((b-a)/step)+1}, (_,i) => a+i*step);
+const TONES = {
+  grand: {label:'그랜드', bright:true, files: range(21,108).map(m => [m, 's', `vendor/tones/grand/${m}.mp3`])},
+  rhodes: {label:'로즈 (EP)', bright:false, hardFrom:72,
+    files: [29,35,40,45,50,55,59,62,65,71,76,81,86,91,96].flatMap(m => [[m,'s',`vendor/tones/rhodes/${m}_s.mp3`], [m,'h',`vendor/tones/rhodes/${m}_h.mp3`]])},
+  salamander: {label:'그랜드 2 (Salamander)', bright:true,
+    files: range(21,108,3).map(m => [m, 's', `vendor/piano/${({0:'C',3:'Ds',6:'Fs',9:'A'})[m%12]}${Math.floor(m/12)-1}.mp3`])},
+};
+let TONE = 'grand', BANK = {keys:[], s:new Map(), h:new Map()};
+const BANKS = {};                                  // 한 번 불러온 음색은 다시 받지 않는다
+function loadTone(name){
+  if (!TONES[name]) name = 'grand';
+  TONE = name; if ($('#tone')) $('#tone').value = name;
+  if (BANKS[name]){ BANK = BANKS[name]; return Promise.resolve(); }
+  const ctx = audioCtx(), b = {keys:[], s:new Map(), h:new Map()};
+  const jobs = TONES[name].files.map(([m, layer, file]) =>
+    fetch(file).then(r => r.arrayBuffer()).then(x => ctx.decodeAudioData(x)).then(buf => b[layer].set(m, buf)).catch(() => {}));
+  return Promise.all(jobs).then(() => { b.keys = [...b.s.keys()].sort((x,y) => x-y); BANKS[name] = b; if (TONE===name) BANK = b; });
 }
 function tone(dest, when, dur, p, v){
-  const base = 21 + 3*Math.round((clamp(p,21,108)-21)/3);
-  if (!PIANO.has(base)) return synthTone(dest, when, dur, p, v);
+  const K = BANK.keys; if (!K.length) return synthTone(dest, when, dur, p, v);
+  let base = K[0]; for (const k of K) if (Math.abs(k-p) < Math.abs(base-p)) base = k;
+  const T = TONES[TONE], hard = T.hardFrom && v >= T.hardFrom && BANK.h.get(base);
   const vel = v/127, src = actx.createBufferSource(), g = actx.createGain(), lp = actx.createBiquadFilter();
-  src.buffer = PIANO.get(base); src.playbackRate.value = Math.pow(2, (p-base)/12);
-  lp.type = 'lowpass'; lp.frequency.value = 1800 + 14000*vel*vel;            // 세게 칠수록 밝은 소리
+  src.buffer = hard || BANK.s.get(base); src.playbackRate.value = Math.pow(2, (p-base)/12);
+  lp.type = 'lowpass'; lp.frequency.value = T.bright ? 1800 + 14000*vel*vel : 9000 + 9000*vel;   // 세게 칠수록 밝은 소리
   const amp = 0.25 + 0.75*vel, off = when + Math.max(0.05, dur);            // 약하게 친 음도 들리게
   g.gain.setValueAtTime(amp, when); g.gain.setValueAtTime(amp, off);
   g.gain.setTargetAtTime(0, off, 0.12);                                      // 건반을 떼면 댐퍼가 소리를 멈춘다
@@ -1184,14 +1195,15 @@ function undo(){ const s=hist.pop(); if (!s) return; const o=JSON.parse(s);
   S.notes=o.notes; S.split=o.split; S.offset=o.offset; if (!byId(S.sel)) S.sel=null;
   $('#undo').disabled=!hist.length; update(); toast('되돌렸습니다'); }
 let saveTimer=0;
-function saveSoon(){
+function saveNow(){
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    if (!S.path || !API) return;
-    const settings = {}; SETTINGS.forEach(k => settings[k]=S[k]);
-    API.save_edits(S.path, {notes:S.notes, settings, nid}).catch(()=>{});
-  }, 800);
+  if (!S.path || !API || !S.result) return;
+  const settings = {}; SETTINGS.forEach(k => settings[k]=S[k]);
+  API.save_edits(S.path, {notes:S.notes, settings, nid}).catch(()=>{});
 }
+function saveSoon(){ clearTimeout(saveTimer); saveTimer = setTimeout(saveNow, 800); }
+// 편집 화면에서 작업 목록(시작 화면)으로. 고친 내용은 바로 저장해 두고 간다
+function goHome(){ if (playing) pause(); saveNow(); show('start'); loadRecent(); }
 
 /* ---------- 선택, 검토 ---------- */
 function select(id, o={}){
@@ -1317,6 +1329,7 @@ function bindControls(){
   $('#srcRes').addEventListener('click', () => setSource('res'));
   $('#clickBtn').addEventListener('click', () => setClick(!clickOn));
   $('#otherBtn').addEventListener('click', chooseAndOpen);
+  $('#homeBtn').addEventListener('click', goHome);
   $('#rerunBtn').addEventListener('click', rerun);
   $('#sepStart').addEventListener('change', e => setSeparate(e.target.checked));
   $('#sepYt').addEventListener('change', e => setSeparate(e.target.checked));
@@ -1746,6 +1759,7 @@ window.__dev = {printPages, musicXml, ytRange:(a,b) => { ytSet('end',b); ytSet('
   },
   beats:() => JSON.stringify({offset:S.offset, bpm:S.bpm, follow:S.follow, ts:S.ts, beats:BEATS.map(x => +x.toFixed(3))}),
   subdiv:() => JSON.stringify(Object.fromEntries(['trip','six','fast'].map(k => [k, {R:[...A[k].R].sort((a,b)=>a-b), L:[...A[k].L].sort((a,b)=>a-b)}]))),
+  toneBanks:() => JSON.stringify(Object.fromEntries(Object.entries(BANKS).map(([k,b]) => [k, `약 ${b.s.size} / 센 ${b.h.size}`]))),
   useBeats:arr => { DEV_BEATS = arr; update(); return A.measures.length; },
   measureTime:i => { const bm=BPMEAS[S.ts]; return [+timeAt(i*bm).toFixed(3), +timeAt((i+1)*bm).toFixed(3)]; },
   inputOf:i => { const bm=BPMEAS[S.ts], t0=timeAt(i*bm), t1=timeAt((i+1)*bm);
@@ -1753,7 +1767,7 @@ window.__dev = {printPages, musicXml, ytRange:(a,b) => { ytSet('end',b); ytSet('
       .map(n => `${n.p}${handOf(n)} 박${(beatPos(n.t)-i*bm).toFixed(2)} 길이${((beatPos(n.t+n.d)-beatPos(n.t))).toFixed(2)}박${GRACE.ids.has(n.id)?' 꾸밈':''}`)); },
   notesIn:(t0,t1) => JSON.stringify(S.notes.filter(n => n.t>=t0 && n.t<t1).map(n => [n.p, +n.t.toFixed(2), +n.d.toFixed(2), handOf(n)])),
   state:() => ({notes:S.notes.length, measures:A && A.measures.length, bpm:S.bpm,
-  offset:S.offset, key:A && A.auto.name, svg:!!$('#score svg'), piano:PIANO.size, graces:GRACE.ids.size,
+  offset:S.offset, key:A && A.auto.name, svg:!!$('#score svg'), piano:BANK.keys.length, tone:TONE, graces:GRACE.ids.size,
   hands:[...AUTOHAND.values()].reduce((o,h) => (o[h]=(o[h]||0)+1, o), {}), errors:window.__errors || []})};
 
 function init(api){
@@ -1765,7 +1779,9 @@ function init(api){
     window.addEventListener('unhandledrejection', e => report('promise: '+(e.reason && (e.reason.stack || e.reason))));
   }
   bindControls(); bindRoll(); bindYouTube();
-  loadPiano();
+  loadTone('grand');
+  if (API.get_pref) API.get_pref('tone').then(v => { if (v && v!==TONE) loadTone(v); });
+  $('#tone').addEventListener('change', e => { loadTone(e.target.value); if (API.set_pref) API.set_pref('tone', TONE); });
   setVolume(1, false);
   if (API.get_pref) API.get_pref('volume').then(v => { if (typeof v === 'number') setVolume(v, false); });
   if (API.get_pref) API.get_pref('separate').then(v => setSeparate(v === true, false));
