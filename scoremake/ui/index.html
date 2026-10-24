@@ -15,9 +15,9 @@
     <button class="btn primary lg" id="openBtn">영상 열기</button>
     <p class="hint">또는 파일을 이 창에 끌어다 놓으세요 · mp4, mov, mkv, mp3, wav 등</p>
     <label class="check sep-opt"><input type="checkbox" id="sepStart"> 노래·드럼·베이스가 섞인 음원이면 피아노 소리만 걸러서 인식 <span class="hint">(곡 길이만큼 더 걸림)</span></label>
-    <div class="or"><span>또는 유튜브에서</span></div>
+    <div class="or"><span>또는 유튜브·인스타그램에서</span></div>
     <form class="yt-row" id="ytForm">
-      <input id="ytUrl" type="text" placeholder="유튜브 링크를 붙여 넣으세요" aria-label="유튜브 링크" autocomplete="off">
+      <input id="ytUrl" type="text" placeholder="유튜브나 인스타그램 릴스 링크를 붙여 넣으세요" aria-label="영상 링크" autocomplete="off">
       <button class="btn" id="ytGo" type="submit">불러오기</button>
     </form>
     <p class="err" id="ytErr" hidden></p>
@@ -168,7 +168,7 @@
       <section class="card score-card">
         <div class="panel-head"><h2>악보 미리보기</h2><span class="score-meta mono" id="scoreMeta"></span></div>
         <div class="paper"><div id="score"></div></div>
-        <p class="hint tips">음표를 누르면 피아노롤에서 선택되고, 마디를 누르면 그 마디로 재생 위치가 옮겨집니다.</p>
+        <p class="hint tips">음표를 누르면 피아노롤에서 선택되고, 마디를 누르면 그 마디로 재생 위치가 옮겨집니다. 코드 이름(또는 코드 줄의 빈 곳)을 누르면 코드를 고칠 수 있습니다.</p>
       </section>
     </section>
   </div>
@@ -180,10 +180,12 @@
     <div class="seg-wrap">
       <div class="seg-row">
         <div class="seg" role="group" aria-label="들을 소리"><button id="srcRaw" aria-pressed="true">원본 소리</button><button id="srcRes" aria-pressed="false">인식 결과</button></div>
+        <div class="seg" role="group" aria-label="들을 손" title="인식 결과를 한 손만 들어 보기"><button id="hearboth" aria-pressed="true">양손</button><button id="hearR" aria-pressed="false">오른손</button><button id="hearL" aria-pressed="false">왼손</button></div>
         <div class="seg"><button id="clickBtn" aria-pressed="false" title="박마다 딸깍 소리 (M)">박 소리</button></div>
         <select id="tone" class="tone-sel" title="인식 결과를 재생할 때 쓰는 소리"><option value="grand">그랜드</option><option value="rhodes">로즈 (EP)</option><option value="salamander">그랜드 2</option></select>
+        <select id="rate" class="tone-sel" title="재생 속도 (원본 소리·인식 결과·박 소리 모두)" aria-label="재생 속도"><option value="1">1배속</option><option value="0.9">0.9배속</option><option value="0.75">0.75배속</option><option value="0.6">0.6배속</option><option value="0.5">0.5배속</option></select>
       </div>
-      <span class="hint">재생 중에 바꿔 가며 비교하세요 · 박 소리로 박이 맞는지 들어 보세요 (M)</span>
+      <span class="hint">재생 중에 바꿔 가며 비교하세요 · 오른손·왼손: 인식 결과를 한 손만 · 박 소리로 박이 맞는지 들어 보세요 (M)</span>
     </div>
     <div class="vol">
       <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 6h3l4-3.5v11L5 10H2z"/><path d="M11 5.2a4 4 0 0 1 0 5.6M12.8 3.4a6.5 6.5 0 0 1 0 9.2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
@@ -195,6 +197,16 @@
 </div>
 
 <div class="toast" id="toast" role="status" hidden></div>
+<div id="chordPop" class="chord-pop" role="dialog" aria-labelledby="cpTitle" hidden>
+  <div class="cp-head"><b id="cpTitle"></b><button type="button" class="btn icon" id="cpClose" aria-label="닫기">×</button></div>
+  <div class="cp-cands" id="cpCands"></div>
+  <form class="cp-form" id="cpForm">
+    <input id="cpInput" type="text" placeholder="직접 적기 (예: Bb7, F#m7, C/E)" aria-label="코드 이름" autocomplete="off" spellcheck="false">
+    <button class="btn primary" type="submit">적용</button>
+  </form>
+  <p class="err" id="cpErr" hidden>알아볼 수 없는 코드 이름입니다. 예: C, Am7, Bb7, F#m7b5, Csus4, C/E</p>
+  <div class="cp-foot"><button type="button" class="btn" id="cpNone">코드 없음</button><button type="button" class="btn" id="cpAuto">자동으로 되돌리기</button></div>
+</div>
 <div id="printHost" aria-hidden="true"></div>
 
 <script src="vendor/vexflow.js"></script>

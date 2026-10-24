@@ -25,8 +25,8 @@ function devApi(){
 }
 
 /* ---------- 상태 ---------- */
-const SETTINGS = ['bpm','autoBpm','offset','follow','ts','key','grid','triplet','noteLen','fill','graces','voices','chords','handMode','minVel','minConf','split','zoom'];
-const DEFAULTS = {key:'auto', ts:'4/4', grid:3, triplet:true, noteLen:'key', fill:6, graces:true, voices:true, chords:true, handMode:'auto', minVel:12, minConf:0.6, split:60, follow:true};
+const SETTINGS = ['bpm','autoBpm','offset','follow','ts','key','grid','triplet','noteLen','fill','graces','voices','chords','chordFix','handMode','minVel','minConf','split','zoom'];
+const DEFAULTS = {key:'auto', ts:'4/4', grid:3, triplet:true, noteLen:'key', fill:6, graces:true, voices:true, chords:true, chordFix:[], handMode:'auto', minVel:12, minConf:0.6, split:60, follow:true};
 const S = {path:null, name:'', isVideo:true, duration:0, notes:[], pedals:[], result:null,
   bpm:100, autoBpm:100, offset:0, zoom:72, ...DEFAULTS,
   sel:null, source:'raw'};
@@ -190,35 +190,116 @@ function findGraces(vis){
 }
 
 /* ---------- 코드(화음 이름): 박마다 울리는 음을 화음 틀에 맞추고, 동적계획법으로 너무 자주 바뀌지 않게 ---------- */
-// 이름, 근음에서의 반음 간격, 복잡도 부담 (같은 소리면 단순한 화음을 고른다)
-const CHORDS = [['',[0,4,7],0], ['m',[0,3,7],0], ['7',[0,4,7,10],0.08], ['M7',[0,4,7,11],0.08], ['m7',[0,3,7,10],0.08],
-  ['dim',[0,3,6],0.12], ['m7♭5',[0,3,6,10],0.15], ['aug',[0,4,8],0.15], ['sus4',[0,5,7],0.08], ['6',[0,4,7,9],0.16], ['add9',[0,2,4,7],0.2]];
+// 화음 틀: 이름, 뼈대 음 [근음에서의 반음, 역할], 함께 울려도 틀리지 않은 텐션(9·11·13음 등), 복잡도 부담 (같은 소리면 단순한 화음을 고른다)
+// 역할: r 근음, t 3음(sus는 4음), f 5음, a 화음 성격을 정하는 5음(♭5·♯5, 6코드의 5음), s 7음(6코드는 6음)
+const CHORDS = [
+  ['',     [[0,'r'],[4,'t'],[7,'f']],          [2],           0],
+  ['m',    [[0,'r'],[3,'t'],[7,'f']],          [2],           0],
+  ['7',    [[0,'r'],[4,'t'],[7,'f'],[10,'s']], [1,2,3,6,8,9], 0.06],
+  ['M7',   [[0,'r'],[4,'t'],[7,'f'],[11,'s']], [2,9],         0.06],
+  ['m7',   [[0,'r'],[3,'t'],[7,'f'],[10,'s']], [2,5,9],       0.06],
+  ['m7♭5', [[0,'r'],[3,'t'],[6,'a'],[10,'s']], [2,5,8],       0.12],
+  ['dim7', [[0,'r'],[3,'t'],[6,'a'],[9,'s']],  [],            0.14],
+  ['dim',  [[0,'r'],[3,'t'],[6,'a']],          [],            0.16],
+  ['aug',  [[0,'r'],[4,'t'],[8,'a']],          [],            0.16],
+  ['sus4', [[0,'r'],[5,'t'],[7,'f']],          [2],           0.08],
+  ['7sus4',[[0,'r'],[5,'t'],[7,'f'],[10,'s']], [2,9],         0.1],
+  ['6',    [[0,'r'],[4,'t'],[7,'a'],[9,'s']],  [2],           0.12],
+  ['m6',   [[0,'r'],[3,'t'],[7,'a'],[9,'s']],  [2],           0.14]];
+const CHORD_MISS = {r:0.15, t:0.25, f:0.1, a:0.25, s:0.2};   // 뼈대 음이 (거의) 안 울릴 때의 부담
+const CHORD_TENSION = 0.6, CHORD_OUT = 0.9;                  // 텐션은 뼈대 음의 6할만큼 맞는 음으로, 밖의 음은 9할만큼 틀린 음으로 친다
+const CHORD_BASS = {r:0.3, x:-0.1, o:-0.2};                  // 베이스가 근음이면 가산, 텐션·밖의 음이면 감산 (그 밖의 뼈대 음이면 0.05)
+const BASS_MAX = 55, BASS_KEEP = 2;   // G3 아래 음을 베이스로 본다. 베이스를 새로 치지 않은 박은 직전 베이스(2박 안에 친 것)가 이어진다
 const CHORD_CANDS = [];
-for (let r=0; r<12; r++) for (const [kind, iv, cx] of CHORDS) CHORD_CANDS.push({root:r, kind, pcs:iv.map(x => (x+r)%12), cx});
+for (let r=0; r<12; r++) for (const [kind, core, tens, cx] of CHORDS){
+  const role = new Array(12).fill('o');            // 음마다 이 화음에서의 역할: 뼈대 역할 / 'x' 텐션 / 'o' 밖의 음
+  for (const t of tens) role[(t+r)%12] = 'x';
+  for (const [iv, ro] of core) role[(iv+r)%12] = ro;
+  CHORD_CANDS.push({root:r, kind, role, pcs:core.map(([iv]) => (iv+r)%12), cx});
+}
 const CHORD_CHANGE = {bar:0.15, half:0.3, beat:0.5};     // 코드를 바꾸는 부담: 마디 처음 < 마디 가운데 < 그 밖의 박
-const chordName = (c, flats) => { const N = flats ? FL : SH; return N[c.root] + c.kind + (c.bass!==null && c.bass!==c.root ? '/'+N[c.bass] : ''); };
+// 코드 근음 철자는 조표에 맞춘다 (C장조에서 B♭7·F♯m7♭5, A장조에서 C♯m·G♯7)
+function chordSpell(key){
+  const n = key.flats ? (key.pc*5)%12 : (key.pc*7)%12, N = [...FL];   // n: 조표의 ♭ 또는 ♯ 개수
+  if (key.flats){ if (n < 3) N[6] = 'F♯'; }
+  else { N[6] = 'F♯'; if (n >= 2) N[1] = 'C♯'; if (n >= 3) N[8] = 'G♯'; if (n >= 4) N[3] = 'D♯'; if (n >= 5) N[10] = 'A♯'; }
+  return N;
+}
+const chordName = (c, key) => { if (c.label) return c.label; const N = chordSpell(key);
+  return N[c.root] + c.kind + (c.bass!==null && c.bass!==c.root ? '/'+N[c.bass] : ''); };
+
+/* 사용자가 적은 코드 이름 → {root, kind, bass, label}. 'Bb7', 'C#m7b5', 'Cmaj7', 'F/A', 'C9'처럼 적어도 된다.
+ * 틀에 없는 이름(C9, Cm11 등)은 가장 가까운 틀(7, m7)로 판정에 쓰고, 화면에는 적은 그대로 보여 준다. 알아볼 수 없으면 null */
+const PC_OF = {C:0, D:2, E:4, F:5, G:7, A:9, B:11};
+function parseChord(text){
+  const m = String(text).trim().match(/^([A-Ga-g])([b♭#♯]?)([^/]*?)\s*(?:\/\s*([A-Ga-g])([b♭#♯]?))?$/);
+  if (!m) return null;
+  const acc = a => a==='b'||a==='♭' ? -1 : a==='#'||a==='♯' ? 1 : 0, sym = a => ({b:'♭','♭':'♭','#':'♯','♯':'♯'})[a] || '';
+  const L = m[1].toUpperCase(), root = (PC_OF[L] + acc(m[2]) + 12) % 12;
+  const q = m[3].trim().replace(/b(?=\d)/g,'♭').replace(/#(?=\d)/g,'♯'), t = q.replace(/[()]/g,'');
+  let kind = '';
+  if (/^(m7♭5|min7♭5|-7♭5|ø)/.test(t)) kind = 'm7♭5';
+  else if (/^(dim7|°7|o7)/.test(t)) kind = 'dim7';
+  else if (/^(dim|°|o)/.test(t)) kind = 'dim';
+  else if (/^(aug|\+)/.test(t)) kind = 'aug';
+  else if (/^(maj|M|Δ)/.test(t)) kind = /^(maj|M|Δ)6/.test(t) ? '6' : /\d/.test(t) ? 'M7' : '';
+  else if (/^(min|m|-)/.test(t)){ const r = t.replace(/^(min|m|-)/, ''); kind = /^6/.test(r) ? 'm6' : /^(7|9|11|13)/.test(r) ? 'm7' : 'm'; }
+  else if (/^(7|9|11|13)/.test(t)) kind = /sus/.test(t) ? '7sus4' : '7';
+  else if (/^sus/.test(t)) kind = 'sus4';
+  else if (/^6/.test(t)) kind = '6';
+  const bass = m[4] ? (PC_OF[m[4].toUpperCase()] + acc(m[5]) + 12) % 12 : null;
+  return {root, kind, bass, label: L + sym(m[2]) + q + (m[4] ? '/' + m[4].toUpperCase() + sym(m[5]) : '')};
+}
+
+// 박 하나의 음 무게(seg)가 화음 틀(c)에 얼마나 맞는지
+function chordFit(seg, c, inKey){
+  if (!seg.tot) return 0;
+  let core = 0, tens = 0, out = 0, miss = 0;
+  for (let pc=0; pc<12; pc++){
+    const x = seg.w[pc]/seg.tot, ro = c.role[pc];
+    if (ro==='o') out += x; else if (ro==='x') tens += x; else { core += x; if (x < 0.04) miss += CHORD_MISS[ro]; }
+  }
+  let bass = seg.low < Infinity ? c.role[seg.low%12] : null;
+  if (bass==='t' && c.kind.includes('sus')) bass = 'x';   // sus 코드의 4음이 베이스면 G7sus4/C처럼 어색한 이름이 된다
+  const bs = bass===null ? 0 : CHORD_BASS[bass] ?? 0.05;
+  return core + CHORD_TENSION*tens - CHORD_OUT*out - miss - c.cx + inKey + bs;
+}
+let CHORD_SEGS = null;   // 마지막 판정의 박별 음 무게와 조 (코드 고치기 창에서 후보를 고를 때 쓴다)
 function detectChords(vis, key){
   const bm = BPMEAS[S.ts], nBeats = Math.max(1, Math.ceil(beatPos(lastNoteEnd())) + 1);
-  // 박마다 울리는 음의 무게 (페달로 울리는 길이까지, 세게·낮게 친 음일수록 무겁게)와 가장 낮은 음
+  // 박마다 울리는 음의 무게 (누른 동안은 그대로, 페달로만 울리는 동안은 절반. 세게·낮게 친 음일수록 무겁게, 높은 멜로디는 가볍게)
   const segs = Array.from({length:nBeats}, () => ({w:new Array(12).fill(0), tot:0, low:Infinity, keys:[]}));
   for (const n of vis){
     if (GRACE.ids.has(n.id)) continue;
-    const b0 = beatPos(n.t), b1 = beatPos(pedalEnd(n)), bk = beatPos(n.t+n.d);
-    for (let b = Math.max(0, Math.floor(b0)); b < Math.min(nBeats, Math.ceil(bk)); b++) segs[b].keys.push([b0, bk]);
+    const b0 = beatPos(n.t), bk = beatPos(n.t+n.d), b1 = Math.max(bk, beatPos(pedalEnd(n)));
+    const reg = n.p < 55 ? 1.5 : n.p >= 72 ? 0.7 : 1;
+    for (let b = Math.max(0, Math.floor(b0)); b < Math.min(nBeats, Math.ceil(bk)); b++) segs[b].keys.push([b0, bk, n.p]);
     for (let b = Math.max(0, Math.floor(b0)); b < Math.min(nBeats, Math.ceil(b1)); b++){
       const ov = Math.min(b+1, b1) - Math.max(b, b0); if (ov <= 0.05) continue;
-      const wt = ov * (0.5 + n.v/127) * (n.p < 55 ? 1.5 : 1);
+      const held = Math.max(0, Math.min(b+1, bk) - Math.max(b, b0));
+      const wt = (held + (ov-held)*0.5) * (0.5 + n.v/127) * reg;
       segs[b].w[n.p%12] += wt; segs[b].tot += wt;
       if (ov >= 0.25) segs[b].low = Math.min(segs[b].low, n.p);
       segs[b].byP = segs[b].byP || new Map(); segs[b].byP.set(n.p, (segs[b].byP.get(n.p)||0) + wt);
     }
   }
+  // 베이스: 박 안에서 친 낮은 음은 짧게 끊어 쳐도(엇박의 짧은 베이스) 베이스로 본다
+  const lows = vis.filter(n => n.p < BASS_MAX && !GRACE.ids.has(n.id)).map(n => [n.p, beatPos(n.t)]).sort((a,b) => a[1]-b[1]);
+  let li = 0, lastBass = null;
+  segs.forEach((seg, b) => {
+    let struck = Infinity;
+    for (; li < lows.length && lows[li][1] < b+1; li++){ if (lows[li][1] >= b-0.1) struck = Math.min(struck, lows[li][0]); lastBass = lows[li]; }
+    seg.low = Math.min(seg.low, struck);
+    if (seg.low >= BASS_MAX && lastBass && lastBass[1] >= b - BASS_KEEP) seg.low = Math.min(seg.low, lastBass[0]);
+  });
   // 건반을 실제로 동시에 누른 음이 없는 박은 멜로디뿐이라 코드를 정하지 않는다 (페달로 겹친 멜로디는 화음이 아니다).
-  // 동시에 누름: 0.2박 넘게, 그리고 짧은 쪽 음 길이의 절반 넘게 겹침 (레가토로 살짝 겹쳐 이어 친 멜로디는 제외)
+  // 동시에 누름: 0.2박 넘게, 그리고 짧은 쪽 음 길이의 절반 넘게 겹침 (레가토로 살짝 겹쳐 이어 친 멜로디는 제외),
+  // 또는 서로 다른 세 음 넘게 함께 침 (짧게 끊어 친 반주 화음)
   segs.forEach((seg, b) => {
     const ks = seg.keys, lo = b, hi = b+1;
     let poly = false;
     for (let i=0; i<ks.length && !poly; i++) for (let j=i+1; j<ks.length; j++){
+      if (ks[i][0] >= lo-0.1 && new Set(ks.filter(x => Math.abs(x[0]-ks[i][0]) < 0.1).map(x => x[2]%12)).size >= 3){ poly = true; break; }
       const s0 = Math.max(ks[i][0], ks[j][0], lo), s1 = Math.min(ks[i][1], ks[j][1], hi);
       const shorter = Math.min(ks[i][1]-ks[i][0], ks[j][1]-ks[j][0]);
       if (s1 - s0 >= Math.max(0.2, shorter*0.5)){ poly = true; break; }
@@ -227,23 +308,24 @@ function detectChords(vis, key){
   });
   const scale = new Set([0,2,4,5,7,9,11].map(x => (x+key.pc)%12));   // 조의 음계 안 화음에 작은 가산점
   const inKey = CHORD_CANDS.map(c => c.pcs.every(pc => scale.has(pc)) ? 0.06 : 0);
-  const score = (seg, c, ci) => {
-    if (!seg.tot) return 0;
-    let inS = 0, missing = 0;
-    for (const pc of c.pcs){ const x = seg.w[pc]/seg.tot; inS += x; if (x < 0.04) missing++; }
-    const bass = seg.low < Infinity ? seg.low%12 : -1;
-    return inS - 0.7*(1-inS) - 0.15*missing - c.cx + inKey[ci] + (bass===c.root ? 0.15 : c.pcs.includes(bass) ? 0.03 : 0);
-  };
+  CHORD_SEGS = {segs, inKey, key};
+  // 사용자가 고친 코드: 그 박은 그 코드로 정해 두고 앞뒤 박을 판정한다 ('' = 코드 없음)
+  const fix = new Map();
+  for (const f of S.chordFix || []){
+    const k = Math.round(beatPos(f.t)); if (k < 0 || k >= nBeats) continue;
+    const pc = f.name ? parseChord(f.name) : null;
+    fix.set(k, pc ? {...pc, ci: CHORD_CANDS.findIndex(c => c.root===pc.root && c.kind===pc.kind)} : {none: !f.name, label: f.name});
+  }
   const C = CHORD_CANDS.length, dp = [], back = [];
   for (let k=0; k<nBeats; k++){
     const cost = k%bm===0 ? CHORD_CHANGE.bar : (bm===4 && k%bm===2) ? CHORD_CHANGE.half : CHORD_CHANGE.beat;
-    const cur = new Float64Array(C), bk = new Int32Array(C);
+    const cur = new Float64Array(C), bk = new Int32Array(C), fk = fix.get(k);
     let bestPrev = 0, bi = 0;
     if (k){ for (let c=0; c<C; c++) if (dp[k-1][c] > dp[k-1][bi]) bi = c; bestPrev = dp[k-1][bi]; }
     for (let c=0; c<C; c++){
       const stay = k ? dp[k-1][c] : 0, change = k ? bestPrev - (segs[k].tot ? cost : 0) : 0;
       if (stay >= change){ cur[c] = stay; bk[c] = c; } else { cur[c] = change; bk[c] = bi; }
-      cur[c] += score(segs[k], CHORD_CANDS[c], c);
+      cur[c] += fk && fk.ci >= 0 ? (c===fk.ci ? 0 : -100) : chordFit(segs[k], CHORD_CANDS[c], inKey[c]);
     }
     dp.push(cur); back.push(bk);
   }
@@ -254,14 +336,28 @@ function detectChords(vis, key){
   const out = []; let last = -1;
   for (let k=0; k<nBeats; k++){
     if (k%bm===0) last = -1;
+    const fk = fix.get(k);
+    if (fk){
+      if (!fk.none) out.push({tick:k*TPB, root:fk.root ?? null, kind:fk.kind || '', bass:fk.bass ?? null, label:fk.label, fix:true});
+      last = path[k]; continue;
+    }
     if (!segs[k].tot || path[k]===last) continue;
     // 베이스는 그 박에서 충분히 크게 울린 가장 낮은 음 (무게의 1할 이상)
     const strong = [...(segs[k].byP || new Map())].filter(([,w]) => w >= segs[k].tot*0.1).map(([p]) => p);
     const cd = CHORD_CANDS[path[k]], low = strong.length ? Math.min(...strong)%12 : null;
-    out.push({tick:k*TPB, root:cd.root, kind:cd.kind, bass: low!==null && cd.pcs.includes(low) ? low : null});
+    const slash = low!==null && cd.pcs.includes(low) && !(cd.kind.includes('sus') && cd.role[low]==='t');
+    out.push({tick:k*TPB, root:cd.root, kind:cd.kind, bass: slash ? low : null});
     last = path[k];
   }
   return out;
+}
+// k번째 박에 어울리는 코드 후보 (코드 고치기 창)
+function chordChoices(k, n=8){
+  if (!CHORD_SEGS || !CHORD_SEGS.segs[k] || !CHORD_SEGS.segs[k].tot) return [];
+  const {segs, inKey, key} = CHORD_SEGS, seg = segs[k];
+  const low = seg.low < Infinity ? seg.low%12 : null;
+  return CHORD_CANDS.map((c,i) => ({c, s:chordFit(seg, c, inKey[i])})).sort((a,b) => b.s-a.s).slice(0, n)
+    .map(({c}) => chordName({root:c.root, kind:c.kind, bass: low!==null && c.pcs.includes(low) && low!==c.root ? low : null}, key));
 }
 
 /* 양손 판정용: 음마다 악보에서 들어갈 박자 칸(g)을 붙인다 (같은 칸의 음은 한 화음으로 그려진다) */
@@ -485,8 +581,8 @@ function compute(){
   const result = [];
   qs.forEach(q => {
     const t=timeAt(q.start/TPB);   // 재생은 페달로 울리는 길이까지
-    result.push({t, d:Math.max(0.05, timeAt(Math.max(q.end, q.playTick)/TPB)-t), p:q.n.p, v:q.n.v});
-    (GRACE.main.get(q.n.id) || []).forEach(g => result.push({t:t-(q.n.t-g.t), d:g.d, p:g.p, v:g.v}));
+    result.push({t, d:Math.max(0.05, timeAt(Math.max(q.end, q.playTick)/TPB)-t), p:q.n.p, v:q.n.v, h:q.h});
+    (GRACE.main.get(q.n.id) || []).forEach(g => result.push({t:t-(q.n.t-g.t), d:g.d, p:g.p, v:g.v, h:q.h}));
   });
   A = {trip, fast, six, chords: S.chords ? detectChords(vis, key) : [], measures, M, crowd, auto:k, key, result: result.sort((a,b) => a.t-b.t)};
 }
@@ -597,7 +693,7 @@ function pieces(it, trip){
 /* ---------- 악보 그리기 (VexFlow) ---------- */
 const ink = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 let PLAIN = false;                                 // PDF용: 색 표시 없이
-let layout = [], hitboxes = [];
+let layout = [], hitboxes = [], chordHits = [], chordRows = [];
 
 // 쉼표 높이: 위 성부는 위쪽, 아래 성부는 아래쪽에 둔다
 const REST_KEY = {treble:{0:'b/4', 1:'e/5', '-1':'f/4'}, bass:{0:'d/3', 1:'g/3', '-1':'a/2'}};
@@ -753,9 +849,9 @@ function drawScore(box, W, meas, maxPer){
   const L = systemLayout(lines.map(line => line.map(e => e.m)), key.flats);
   const r = new VF.Renderer(box, VF.Renderer.Backends.SVG); r.resize(W, L.height);
   const ctx = r.getContext();
-  const lay = [], hits = [];
+  const lay = [], hits = [], chordHits = [], chordRows = [];   // chordHits: 코드 이름 자리, chordRows: 줄마다 코드 줄의 박 위치 (코드 고치기)
   let carry = null;                                // 앞 마디에서 다음 마디로 이어지는 음표들 {i, R:[], L:[]}
-  let chordEndX = -1e9, lineChords = [], lineTop = Infinity;   // 같은 줄의 코드 이름들: 줄을 다 그린 뒤 가장 높은 음표 바로 위에 한 줄로 쓴다
+  let chordEndX = -1e9, lineChords = [], lineTop = Infinity, lineBeats = [];   // 같은 줄의 코드 이름들: 줄을 다 그린 뒤 가장 높은 음표 바로 위에 한 줄로 쓴다
   lines.forEach((line, sys) => {
     const heads = line.map((e,k) => headOf(e.m, k===0));
     const sumNeed = line.reduce((s,e) => s+e.need, 0), free = usable - heads.reduce((s,h) => s+h, 0);
@@ -768,7 +864,7 @@ function drawScore(box, W, meas, maxPer){
       x += w;
     });
   });
-  return {lay, hits};
+  return {lay, hits, chordHits, chordRows};
 
   // 마디를 넘는 붙임줄: 같은 줄이면 두 음표를 잇고, 줄이 바뀌면 줄 끝·줄 처음에 반쪽씩 긋는다
   function crossTies(i, vR, vL, col, lineEnd){
@@ -790,7 +886,7 @@ function drawScore(box, W, meas, maxPer){
 
   // 코드 이름: 그 박에 시작하는 음표 위치에, 음표가 없으면 앞뒤 음표 사이를 박자 비례로 나눈 위치에
   function chordMarks(i, vR, vL, sT, yC, col, lineEnd){
-    if (col===0){ chordEndX = -1e9; lineChords = []; lineTop = Infinity; }
+    if (col===0){ chordEndX = -1e9; lineChords = []; lineTop = Infinity; lineBeats = []; }
     // 이 마디에서 가장 높이 올라간 것 (음표·기둥·셋잇단 괄호, 오선 맨 윗줄)
     let top = sT.getYForLine(0) - 6;
     for (const v of vR){
@@ -799,18 +895,22 @@ function drawScore(box, W, meas, maxPer){
     }
     lineTop = Math.min(lineTop, top);
     const m0 = i*A.M, m1 = m0+A.M, cs = A.chords.filter(c => c.tick>=m0 && c.tick<m1);
-    if (cs.length){
     const pts = [...vR, ...vL].flatMap(v => v.at).map(a => ({tick:a.tick, x:a.sn.getAbsoluteX()})).sort((a,b) => a.tick-b.tick);
     pts.push({tick:m1, x:sT.getNoteEndX()});
     const xAt = t => { const k = pts.findIndex(p => p.tick >= t), b = pts[k], a = k>0 ? pts[k-1] : {tick:m0, x:sT.getNoteStartX()};
       return b.tick===t || b.tick===a.tick ? b.x : a.x + (b.x-a.x)*(t-a.tick)/(b.tick-a.tick); };
-    for (const c of cs){ const label = chordName(c, A.key.flats); const px = Math.max(xAt(c.tick) - 2, chordEndX + 8);
-      lineChords.push({label, px}); chordEndX = px + label.length*10.5; }   // 15px 글꼴 기준 글자 폭 어림 (PDF에서 더 넓게 찍혀 넉넉히)
-    }
-    if (!lineEnd || !lineChords.length) return;
+    lineBeats.push({i, x0:sT.getX(), x1:sT.getX()+sT.getWidth(), xs:Array.from({length:A.M/TPB}, (_,b) => xAt(m0 + b*TPB))});
+    for (const c of cs){ const label = chordName(c, A.key); const px = Math.max(xAt(c.tick) - 2, chordEndX + 8);
+      lineChords.push({label, px, c}); chordEndX = px + label.length*10.5; }   // 15px 글꼴 기준 글자 폭 어림 (PDF에서 더 넓게 찍혀 넉넉히)
+    if (!lineEnd || !A.chords.length) return;
     const y = Math.max(yC, lineTop - 12);    // 줄 위 코드 자리보다 위로는 올리지 않는다
-    ctx.save(); ctx.setFont(CHORD_FONT, 15); ctx.setFillStyle(PLAIN ? '#000000' : ink('--paper-ink') || '#000000');
-    lineChords.forEach(l => ctx.fillText(l.label, l.px, y));
+    chordRows.push({y0:y-18, y1:y+5, ms:lineBeats});
+    ctx.save(); ctx.setFont(CHORD_FONT, 15);
+    lineChords.forEach(l => {   // 화면에서는 직접 고친 코드를 강조색으로
+      ctx.setFillStyle(PLAIN ? '#000000' : l.c.fix && ink('--accent') || ink('--paper-ink') || '#000000');
+      ctx.fillText(l.label, l.px, y);
+      chordHits.push({x:l.px, y:y-15, w:l.label.length*9, h:19, tick:l.c.tick});
+    });
     ctx.restore();
   }
 
@@ -850,7 +950,7 @@ function renderScore(){
   host.innerHTML = '';
   const box = document.createElement('div'); host.appendChild(box);
   const out = drawScore(box, Math.max(300, host.clientWidth), A.measures);
-  layout = out.lay; hitboxes = out.hits;
+  layout = out.lay; hitboxes = out.hits; chordHits = out.chordHits; chordRows = out.chordRows;
   layout.forEach(L => {
     const d = document.createElement('div'); d.className='mbox';
     d.style.cssText = `left:${L.x}px;top:${L.y}px;width:${L.w}px;height:${L.h}px`;
@@ -919,14 +1019,16 @@ function partXml(items, trip, staff, voice, flats, ghost=false, change=null){
   return out;
 }
 /* 코드 이름: 마디 처음 기준 offset으로 둔다 */
-const XKIND = {'':'major', m:'minor', '7':'dominant', M7:'major-seventh', m7:'minor-seventh', dim:'diminished', 'm7♭5':'half-diminished',
-  aug:'augmented', sus4:'suspended-fourth', '6':'major-sixth', add9:'major'};
-function harmonyXml(i, flats){
-  const m0 = i*A.M, step = pc => { const n = (flats?VFL:VSH)[pc]; return `<root-step>${n[0].toUpperCase()}</root-step>${n.length>1 ? `<root-alter>${n[1]==='#'?1:-1}</root-alter>` : ''}`; };
-  return A.chords.filter(c => c.tick>=m0 && c.tick<m0+A.M).map(c => {
-    const bass = c.bass!==null && c.bass!==c.root ? `<bass>${step(c.bass).replace(/root-/g,'bass-')}</bass>` : '';
-    const add9 = c.kind==='add9' ? '<degree><degree-value>9</degree-value><degree-alter>0</degree-alter><degree-type>add</degree-type></degree>' : '';
-    return `<harmony><root>${step(c.root)}</root><kind text="${xmlEsc(c.kind)}">${XKIND[c.kind]}</kind>${bass}${add9}${c.tick>m0 ? `<offset>${c.tick-m0}</offset>` : ''}</harmony>`;
+const XKIND = {'':'major', m:'minor', '7':'dominant', M7:'major-seventh', m7:'minor-seventh', 'm7♭5':'half-diminished', dim7:'diminished-seventh',
+  dim:'diminished', aug:'augmented', sus4:'suspended-fourth', '7sus4':'suspended-fourth', '6':'major-sixth', m6:'minor-sixth'};
+function harmonyXml(i, key){
+  const m0 = i*A.M, N = chordSpell(key);
+  const step = (name, tag) => `<${tag}-step>${name[0]}</${tag}-step>${name.length>1 ? `<${tag}-alter>${name[1]==='♯'?1:-1}</${tag}-alter>` : ''}`;
+  return A.chords.filter(c => c.tick>=m0 && c.tick<m0+A.M && c.root!==null).map(c => {
+    const lab = c.label && c.label.match(/^([A-G][♭♯]?)(.*?)(?:\/([A-G][♭♯]?))?$/);   // 사용자가 적은 이름은 적은 철자 그대로
+    const rootN = lab ? lab[1] : N[c.root], bassN = lab ? lab[3] : c.bass!==null && c.bass!==c.root ? N[c.bass] : null;
+    const deg = c.kind==='7sus4' ? '<degree><degree-value>7</degree-value><degree-alter>-1</degree-alter><degree-type>add</degree-type></degree>' : '';
+    return `<harmony><root>${step(rootN,'root')}</root><kind text="${xmlEsc(lab ? lab[2] : c.kind)}">${XKIND[c.kind]}</kind>${bassN ? `<bass>${step(bassN,'bass')}</bass>` : ''}${deg}${c.tick>m0 ? `<offset>${c.tick-m0}</offset>` : ''}</harmony>`;
   }).join('');
 }
 const clefXml = (num, clef) => clef==='treble' ? `<clef number="${num}"><sign>G</sign><line>2</line></clef>` : `<clef number="${num}"><sign>F</sign><line>4</line></clef>`;
@@ -944,7 +1046,7 @@ function musicXml(){
     if (prev && (prev.R.endClef!==m.R.clef || prev.L.endClef!==m.L.clef))
       attrs += `<attributes>${prev.R.endClef!==m.R.clef ? clefXml(1,m.R.clef) : ''}${prev.L.endClef!==m.L.clef ? clefXml(2,m.L.clef) : ''}</attributes>`;
     const end = i===last ? '<barline location="right"><bar-style>light-heavy</bar-style></barline>' : '';
-    return `<measure number="${i+1}">${attrs}${harmonyXml(i, key.flats)}${staffXml(m,'R',1,key.flats)}<backup><duration>${A.M}</duration></backup>${staffXml(m,'L',2,key.flats)}${end}</measure>`;
+    return `<measure number="${i+1}">${attrs}${harmonyXml(i, key)}${staffXml(m,'R',1,key.flats)}<backup><duration>${A.M}</duration></backup>${staffXml(m,'L',2,key.flats)}${end}</measure>`;
   }).join('\n');
   return `<?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 4.0 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">
@@ -1164,7 +1266,7 @@ function stopClicks(){ if (clickBus){ const b=clickBus; b.gain.setTargetAtTime(0
 function advanceClicks(){
   if (!clickBus) return;
   const t=now(), hz=t+0.25, bm=BPMEAS[S.ts];
-  for (let k=0; k<BEATS.length; k++){ const b=BEATS[k]; if (b < clickTo) continue; if (b >= hz) break; click(actx.currentTime+Math.max(0,b-t), k%bm===0); }
+  for (let k=0; k<BEATS.length; k++){ const b=BEATS[k]; if (b < clickTo) continue; if (b >= hz) break; click(actx.currentTime+Math.max(0,b-t)/rate, k%bm===0); }
   clickTo = hz;
 }
 function setClick(on){
@@ -1178,21 +1280,36 @@ function seek(t){ media().currentTime = clamp(t, 0, totalSec()); if (synthOn){ s
 function advanceSynth(){
   if (!synthOn) return;
   const t=now(), hz=t+0.25;
-  for (const n of A.result){ if (n.t < schedTo) continue; if (n.t >= hz) break; tone(bus, actx.currentTime+Math.max(0,n.t-t), n.d, n.p, n.v); }
+  for (const n of A.result){ if (n.t < schedTo) continue; if (n.t >= hz) break; if (hearHand==='both' || n.h===hearHand) tone(bus, actx.currentTime+Math.max(0,n.t-t)/rate, n.d/rate, n.p, n.v); }
   schedTo = hz;
 }
 function setSource(s){
-  S.source=s; $('#srcRaw').setAttribute('aria-pressed', s==='raw'); $('#srcRes').setAttribute('aria-pressed', s==='res');
-  if (playing){ media().muted = s==='res'; s==='res' ? startSynth() : stopSynth(); }
+  const was=S.source; S.source=s; $('#srcRaw').setAttribute('aria-pressed', s==='raw'); $('#srcRes').setAttribute('aria-pressed', s==='res');
+  if (s==='raw') setHearHand('both');   // 원본 소리는 손을 나눌 수 없다
+  if (playing && s!==was){ media().muted = s==='res'; s==='res' ? startSynth() : stopSynth(); }
+}
+/* 재생 속도: 영상(원본 소리, 음높이는 그대로)을 느리게 하고, 인식 결과·박 소리는 영상 시간 간격을 속도로 나눠 예약한다 */
+let rate=1;
+function setRate(r){
+  rate=r; const m=media(); m.defaultPlaybackRate=r; m.playbackRate=r; m.preservesPitch=true;   // default도 바꿔 두면 영상을 바꿔도 유지된다
+  $('#rate').value=String(r);
+  if (synthOn){ stopSynth(); startSynth(); } if (clickBus){ stopClicks(); startClicks(); }   // 이미 예약한 소리를 새 속도로 다시
+}
+/* 인식 결과를 한 손만 들어 보기 ('both' | 'R' | 'L'). 한 손을 고르면 인식 결과 재생으로 바꾼다 */
+let hearHand='both';
+function setHearHand(h){
+  hearHand=h; ['both','R','L'].forEach(x => $('#hear'+x).setAttribute('aria-pressed', x===h));
+  if (h!=='both' && S.source!=='res') setSource('res');
+  else if (synthOn){ stopSynth(); startSynth(); }   // 이미 예약해 둔 음을 지우고 바로 반영
 }
 function setPlayIcon(){ $('#playIcon').innerHTML = playing ? '<path d="M3.5 2.5h3.2v11H3.5zM9.3 2.5h3.2v11H9.3z"/>' : '<path d="M4 2.5v11l9.5-5.5z"/>';
   $('#play').setAttribute('aria-label', playing ? '일시정지' : '재생'); }
 
 /* ---------- 되돌리기, 자동 저장 ---------- */
 const hist = [];
-function pushHist(){ hist.push(JSON.stringify({notes:S.notes, split:S.split, offset:S.offset})); if (hist.length>100) hist.shift(); $('#undo').disabled=false; }
+function pushHist(){ hist.push(JSON.stringify({notes:S.notes, split:S.split, offset:S.offset, chordFix:S.chordFix})); if (hist.length>100) hist.shift(); $('#undo').disabled=false; }
 function undo(){ const s=hist.pop(); if (!s) return; const o=JSON.parse(s);
-  S.notes=o.notes; S.split=o.split; S.offset=o.offset; if (!byId(S.sel)) S.sel=null;
+  S.notes=o.notes; S.split=o.split; S.offset=o.offset; S.chordFix=o.chordFix || []; if (!byId(S.sel)) S.sel=null;
   $('#undo').disabled=!hist.length; update(); toast('되돌렸습니다'); }
 let saveTimer=0;
 function saveNow(){
@@ -1204,6 +1321,51 @@ function saveNow(){
 function saveSoon(){ clearTimeout(saveTimer); saveTimer = setTimeout(saveNow, 800); }
 // 편집 화면에서 작업 목록(시작 화면)으로. 고친 내용은 바로 저장해 두고 간다
 function goHome(){ if (playing) pause(); saveNow(); show('start'); loadRecent(); }
+
+/* ---------- 코드 고치기: 악보의 코드 이름(또는 코드 줄의 빈 박)을 누르면 후보를 고르거나 직접 적는다 ---------- */
+// 고친 코드는 박의 시각(초)으로 저장해 템포·첫 박을 바꿔도 같은 자리에 남는다
+let CP = null;   // 고치고 있는 박 번호
+const fixAt = k => (S.chordFix || []).find(f => Math.round(beatPos(f.t)) === k);
+function openChordPop(k, cx, cy){
+  CP = k;
+  const bm = BPMEAS[S.ts], cur = A.chords.find(c => c.tick === k*TPB), curName = cur ? chordName(cur, A.key) : '';
+  $('#cpTitle').textContent = `${Math.floor(k/bm)+1}마디 ${k%bm+1}박 코드`;
+  const cands = chordChoices(k);
+  $('#cpCands').innerHTML = cands.length
+    ? cands.map(n => `<button type="button" class="btn${n===curName ? ' on' : ''}" data-n="${xmlEsc(n)}">${xmlEsc(n)}</button>`).join('')
+    : '<span class="hint">이 박에는 함께 누른 음이 없어 후보가 없습니다. 아래에 직접 적어 주세요.</span>';
+  $('#cpInput').value = curName; $('#cpErr').hidden = true;
+  $('#cpNone').hidden = !cur; $('#cpAuto').hidden = !fixAt(k);
+  const pop = $('#chordPop'); pop.hidden = false;
+  const w = pop.offsetWidth, h = pop.offsetHeight;
+  pop.style.left = clamp(cx - w/2, 8, innerWidth - w - 8) + 'px';
+  pop.style.top = (cy + 16 + h > innerHeight - 8 ? Math.max(8, cy - h - 16) : cy + 16) + 'px';
+  $('#cpInput').focus(); $('#cpInput').select();
+}
+function closeChordPop(){ $('#chordPop').hidden = true; CP = null; }
+function setChordFix(k, name){   // name: 코드 이름, '' = 코드 없음, null = 자동 판정으로 되돌리기
+  pushHist();
+  S.chordFix = (S.chordFix || []).filter(f => Math.round(beatPos(f.t)) !== k);
+  if (name !== null) S.chordFix.push({t:+timeAt(k).toFixed(3), name});
+  closeChordPop(); update();
+}
+function bindChordPop(){
+  $('#cpCands').addEventListener('click', e => { const b = e.target.closest('button[data-n]'); if (b && CP!==null) setChordFix(CP, b.dataset.n); });
+  $('#cpForm').addEventListener('submit', e => {
+    e.preventDefault(); if (CP===null) return;
+    const v = $('#cpInput').value.trim();
+    if (!v){ setChordFix(CP, ''); return; }
+    const c = parseChord(v);
+    if (!c){ $('#cpErr').hidden = false; return; }
+    setChordFix(CP, c.label);
+  });
+  $('#cpNone').addEventListener('click', () => CP!==null && setChordFix(CP, ''));
+  $('#cpAuto').addEventListener('click', () => CP!==null && setChordFix(CP, null));
+  $('#cpClose').addEventListener('click', closeChordPop);
+  $('#chordPop').addEventListener('keydown', e => { if (e.key==='Escape'){ e.stopPropagation(); closeChordPop(); } });
+  document.addEventListener('pointerdown', e => { if (CP!==null && !e.target.closest('#chordPop')) closeChordPop(); });
+  window.addEventListener('scroll', e => { if (CP!==null && !(e.target.closest && e.target.closest('#chordPop'))) closeChordPop(); }, true);
+}
 
 /* ---------- 선택, 검토 ---------- */
 function select(id, o={}){
@@ -1327,6 +1489,8 @@ function bindControls(){
   $('#vol').addEventListener('input', e => setVolume(+e.target.value/100));
   $('#srcRaw').addEventListener('click', () => setSource('raw'));
   $('#srcRes').addEventListener('click', () => setSource('res'));
+  ['both','R','L'].forEach(h => $('#hear'+h).addEventListener('click', () => setHearHand(h)));
+  $('#rate').addEventListener('change', e => setRate(+e.target.value));
   $('#clickBtn').addEventListener('click', () => setClick(!clickOn));
   $('#otherBtn').addEventListener('click', chooseAndOpen);
   $('#homeBtn').addEventListener('click', goHome);
@@ -1396,6 +1560,12 @@ function bindRoll(){
 
   $('#score').addEventListener('click', e => {
     const r=$('#score').getBoundingClientRect(), x=e.clientX-r.left, y=e.clientY-r.top;
+    if (S.chords){   // 코드 이름이나 코드 줄의 빈 박을 누르면 코드 고치기
+      const ch=chordHits.find(b => x>=b.x-3 && x<=b.x+b.w+3 && y>=b.y-3 && y<=b.y+b.h+3);
+      if (ch){ openChordPop(ch.tick/TPB, e.clientX, e.clientY); return; }
+      const row=chordRows.find(R => y>=R.y0 && y<=R.y1), ms=row && row.ms.find(M => x>=M.x0 && x<=M.x1);
+      if (ms){ let b=0; ms.xs.forEach((bx,j) => { if (Math.abs(bx-x) < Math.abs(ms.xs[b]-x)) b=j; }); openChordPop(ms.i*BPMEAS[S.ts]+b, e.clientX, e.clientY); return; }
+    }
     const hb=hitboxes.find(b => x>=b.x-3 && x<=b.x+b.w+3 && y>=b.y-3 && y<=b.y+b.h+3);
     if (hb){ const ids=[...hb.c.byP.values()]; const pick=ids.find(id => needsReview(byId(id))) || ids[0]; select(pick,{scroll:true,seek:true,sound:true}); return; }
     const L=layout.find(L => x>=L.x && x<=L.x+L.w && y>=L.y && y<=L.y+L.h);
@@ -1418,8 +1588,8 @@ function bindRoll(){
   });
 }
 
-/* ---------- 유튜브: 링크 → 구간 고르기 → 받기 → 바로 인식 ---------- */
-// 미리보기는 유튜브 플레이어(player)로 하고, 퍼가기가 막혀 있으면 받아 둔 저화질 영상(video)으로 한다
+/* ---------- 유튜브·인스타그램: 링크 → 구간 고르기 → 받기 → 바로 인식 ---------- */
+// 미리보기는 유튜브 플레이어(player)로 하고, 퍼가기가 막혀 있거나 유튜브가 아니면 받아 둔 저화질 영상(video)으로 한다
 const YTS = {info:null, player:null, video:null, ready:false, fallback:false, start:0, end:0, previewing:false, timer:0, waitTimer:0, busy:false};
 const parseTime = s => { s=String(s).trim(); if (!s) return NaN; const p=s.split(':').map(Number); return p.some(isNaN) ? NaN : p.reduce((a,b) => a*60+b, 0); };
 const fmtHMS = t => { t=Math.max(0,Math.round(t)); const h=Math.floor(t/3600), m=Math.floor(t%3600/60), s=t%60;
@@ -1436,6 +1606,9 @@ function loadYTApi(){
     }
   });
 }
+const isYT = () => YTS.info.youtube !== false;
+const pvMsg = f => (isYT() ? '이 영상은 유튜브 밖에서 재생이 막혀 있어, 구간을 고를 수 있게 미리보기용 저화질 영상을 받고 있습니다… '
+  : `구간을 고를 수 있게 ${YTS.info.site || ''} 영상을 받고 있습니다… `) + Math.round(f*100) + '%';
 function ytNoPlay(msg){ $('#ytNoPlay').textContent=msg; $('#ytNoPlay').hidden=!msg; }
 function ytDestroyPlayer(){ if (YTS.player){ try { YTS.player.destroy(); } catch(e){} YTS.player=null; } }
 function ytStopPlayer(){
@@ -1458,7 +1631,7 @@ function ytFallback(){
   if (YTS.fallback || !YTS.info) return;
   YTS.fallback=true; clearTimeout(YTS.waitTimer); ytDestroyPlayer(); YTS.ready=false;
   $('#ytPlayerBox').innerHTML='';
-  ytNoPlay('이 영상은 유튜브 밖에서 재생이 막혀 있어, 구간을 고를 수 있게 미리보기용 저화질 영상을 받고 있습니다… 0%');
+  ytNoPlay(pvMsg(0));
   API.yt_preview(YTS.info.url, YTS.info.id);
 }
 
@@ -1475,16 +1648,17 @@ async function ytLoad(e){
 }
 
 async function ytEnter(info){
-  YTS.info=info; YTS.start=0; YTS.end = info.duration<=600 ? info.duration : Math.min(info.duration, 180);
-  $('#ytTitle').textContent=info.title; $('#ytMeta').textContent=[info.uploader, fmtHMS(info.duration)].filter(Boolean).join(' · ');
+  YTS.info=info; ytSetDuration(info.duration);
+  $('#ytTitle').textContent=info.title;
   $('#ytProg').hidden=true; $('#ytActions').hidden=false; $('#ytErr2').hidden=true; $('#ytNoPlay').hidden=true;
-  show('yt'); ytRender();
+  show('yt');
   ytStopPlayer(); YTS.ready=false;
   YTS.timer = setInterval(() => {
-    const t=ytNow(); if (isNaN(t)) return;
+    const t=ytNow(); if (isNaN(t) || !YTS.info.duration) return;
     $('#rangeNow').style.left = (t/YTS.info.duration*100)+'%';
     if (YTS.previewing && t >= YTS.end){ YTS.previewing=false; pvPause(); }
   }, 200);
+  if (!isYT()){ ytFallback(); return; }   // 인스타그램 등은 유튜브 플레이어가 없으니 바로 영상을 받는다
   $('#ytPlayerBox').innerHTML='<div id="ytPlayer"></div>';
   if (!await loadYTApi()){ ytFallback(); return; }
   if (YTS.info!==info) return;
@@ -1493,7 +1667,15 @@ async function ytEnter(info){
   YTS.waitTimer = setTimeout(() => { if (!YTS.ready) ytFallback(); }, 10000);
 }
 
+// 길이를 모르면(인스타그램) 미리보기 영상을 받아 길이를 읽을 때까지 구간 고르기와 받기를 막는다
+function ytSetDuration(d){
+  const info=YTS.info; info.duration=d; YTS.start=0; YTS.end = d<=600 ? d : Math.min(d, 180);
+  $('#ytMeta').textContent=[isYT() ? '' : info.site, info.uploader, d ? fmtHMS(d) : ''].filter(Boolean).join(' · ');
+  $('#ytDownload').disabled=!d; document.querySelector('#yt .range').classList.toggle('off', !d);
+  ytRender();
+}
 function ytRender(){
+  if (!YTS.info.duration){ $('#selLen').textContent='영상을 받으면 구간을 고를 수 있습니다.'; return; }
   const d=YTS.info.duration, a=YTS.start/d*100, b=YTS.end/d*100, len=YTS.end-YTS.start;
   $('#rangeSel').style.left=a+'%'; $('#rangeSel').style.width=(b-a)+'%';
   $('#knobA').style.left=a+'%'; $('#knobB').style.left=b+'%';
@@ -1504,7 +1686,7 @@ function ytRender(){
   $('#selLen').textContent = `고른 길이 ${fmtHMS(len)} · 인식에 약 ${est}분`;
 }
 function ytSet(which, v){
-  const d=YTS.info.duration;
+  const d=YTS.info.duration; if (!d) return;
   if (which==='start') YTS.start = clamp(v, 0, YTS.end-1); else YTS.end = clamp(v, YTS.start+1, d);
   ytRender();
 }
@@ -1548,11 +1730,13 @@ function bindYouTube(){
 function ytEvent(kind, data){
   if (kind.startsWith('yt_pv_')){
     if (!YTS.info || data.vid!==YTS.info.id || !YTS.fallback) return;
-    if (kind==='yt_pv_progress') ytNoPlay(`이 영상은 유튜브 밖에서 재생이 막혀 있어, 구간을 고를 수 있게 미리보기용 저화질 영상을 받고 있습니다… ${Math.round(data.f*100)}%`);
+    if (kind==='yt_pv_progress') ytNoPlay(pvMsg(data.f));
     else if (kind==='yt_pv_done'){
       const v=document.createElement('video'); v.controls=true; v.preload='auto'; v.playsInline=true; v.src=data.media;
+      if (!YTS.info.duration) v.addEventListener('loadedmetadata', () => { if (!YTS.info.duration && isFinite(v.duration)) ytSetDuration(Math.floor(v.duration*10)/10); }, {once:true});
       $('#ytPlayerBox').innerHTML=''; $('#ytPlayerBox').appendChild(v); YTS.video=v; ytNoPlay('');
-    } else ytNoPlay('미리보기 영상을 받지 못했습니다. 시간을 직접 적어 구간을 고르세요. 악보용 다운로드는 그대로 됩니다.\n('+data.error+')');
+    } else ytNoPlay((YTS.info.duration ? '미리보기 영상을 받지 못했습니다. 시간을 직접 적어 구간을 고르세요. 악보용 다운로드는 그대로 됩니다.' : '영상을 받지 못했습니다.')
+      + '\n('+data.error+')');
     return;
   }
   if (kind==='yt_progress'){ const p=Math.round(data.f*100); $('#ytBar').style.width=p+'%'; $('#ytProgText').textContent = data.f<0.9 ? `소리 받는 중 ${p}%` : `구간 잘라 내는 중 ${p}%`; }
@@ -1758,6 +1942,19 @@ window.__dev = {printPages, musicXml, ytRange:(a,b) => { ytSet('end',b); ytSet('
     return JSON.stringify(R, null, 1);
   },
   beats:() => JSON.stringify({offset:S.offset, bpm:S.bpm, follow:S.follow, ts:S.ts, beats:BEATS.map(x => +x.toFixed(3))}),
+  // 코드 [박, 이름, 직접 고친 것], 코드 고치기 창 열기, 고친 코드 목록, 되돌리기
+  chords:(b0=0, b1=1e9) => JSON.stringify(A.chords.filter(c => c.tick>=b0*TPB && c.tick<b1*TPB).map(c => [c.tick/TPB, chordName(c, A.key), !!c.fix])),
+  chordPop:k => { openChordPop(k, 400, 300); return `${chordHits.length} hits, ${chordRows.length} rows`; },
+  chordFix:() => JSON.stringify(S.chordFix), undo,
+  // 재생 속도와 영상의 실제 재생 속도
+  rate:() => JSON.stringify({rate, playbackRate:media().playbackRate, defaultRate:media().defaultPlaybackRate, preservesPitch:media().preservesPitch, select:$('#rate').value}),
+  // 들을 손·소리와 재생할 음의 손 분포
+  hear:() => JSON.stringify({hand:hearHand, source:S.source, R:A.result.filter(n => n.h==='R').length, L:A.result.filter(n => n.h==='L').length,
+    none:A.result.filter(n => !n.h).length, pressed:['both','R','L'].filter(x => $('#hear'+x).getAttribute('aria-pressed')==='true')}),
+  // 코드 판정 입력(음마다 박 위치)과 지금 결과. 밖에서 판정 방식을 시험할 때 쓴다
+  chordDump:() => JSON.stringify({bm:BPMEAS[S.ts], key:A.key, nBeats:Math.max(1, Math.ceil(beatPos(lastNoteEnd())) + 1),
+    notes:S.notes.filter(visible).filter(n => !GRACE.ids.has(n.id)).map(n => [n.p, n.v, +beatPos(n.t).toFixed(3), +beatPos(n.t+n.d).toFixed(3), +beatPos(pedalEnd(n)).toFixed(3)]),
+    chords:A.chords.map(c => [c.tick/TPB, chordName(c, A.key)])}),
   subdiv:() => JSON.stringify(Object.fromEntries(['trip','six','fast'].map(k => [k, {R:[...A[k].R].sort((a,b)=>a-b), L:[...A[k].L].sort((a,b)=>a-b)}]))),
   toneBanks:() => JSON.stringify(Object.fromEntries(Object.entries(BANKS).map(([k,b]) => [k, `약 ${b.s.size} / 센 ${b.h.size}`]))),
   useBeats:arr => { DEV_BEATS = arr; update(); return A.measures.length; },
@@ -1778,7 +1975,7 @@ function init(api){
     window.addEventListener('error', e => report(`${e.message} @${e.lineno}:${e.colno}`));
     window.addEventListener('unhandledrejection', e => report('promise: '+(e.reason && (e.reason.stack || e.reason))));
   }
-  bindControls(); bindRoll(); bindYouTube();
+  bindControls(); bindRoll(); bindYouTube(); bindChordPop();
   loadTone('grand');
   if (API.get_pref) API.get_pref('tone').then(v => { if (v && v!==TONE) loadTone(v); });
   $('#tone').addEventListener('change', e => { loadTone(e.target.value); if (API.set_pref) API.set_pref('tone', TONE); });

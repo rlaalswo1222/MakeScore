@@ -410,6 +410,9 @@ def _autotest(window, media, out):
         time.sleep(2)
         print("[시험] 상태:", window.evaluate_js("JSON.stringify(window.__dev.state())"), flush=True)
         for expr in filter(None, os.environ.get("SCOREMAKE_AUTOTEST_EVAL", "").split(";;")):
+            if expr.startswith("sleep:"):  # 재생처럼 시간이 지나야 하는 시험: "sleep:초"
+                time.sleep(float(expr[6:]))
+                continue
             print(f"[시험] {expr} →", window.evaluate_js(expr), flush=True)
         os.makedirs(out, exist_ok=True)
         pages = json.loads(window.evaluate_js("JSON.stringify(window.__dev.printPages())"))

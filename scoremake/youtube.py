@@ -1,4 +1,4 @@
-"""유튜브 링크 → 영상 정보 읽기, 원하는 구간만 받기.
+"""유튜브(또는 인스타 릴스 등 yt-dlp가 아는 사이트) 링크 → 영상 정보 읽기, 원하는 구간만 받기.
 
 유튜브가 자주 바뀌므로 yt-dlp는 exe에 넣지 않고 공식 배포본을 받아 두고 스스로 업데이트한다.
 요즘 유튜브는 JavaScript 실행기(deno/node/bun)가 있어야 받을 수 있다.
@@ -34,8 +34,10 @@ KNOWN_ERRORS = [
     ("Video unavailable", "볼 수 없는 영상입니다. 삭제되었거나 지역 제한이 있을 수 있습니다."),
     ("Sign in to confirm your age", "연령 제한 영상이라 로그인 없이 받을 수 없습니다."),
     ("members-only", "채널 회원 전용 영상이라 받을 수 없습니다."),
-    ("is not a valid URL", "유튜브 링크가 아닙니다."),
-    ("Unsupported URL", "유튜브 링크가 아닙니다."),
+    ("is not a valid URL", "영상 링크가 아닙니다."),
+    ("Unsupported URL", "지원하지 않는 링크입니다. 유튜브나 인스타그램 게시물 링크를 넣어 주세요."),
+    ("login required", "로그인해야 볼 수 있는 게시물이라 받을 수 없습니다. 비공개 계정이거나 인스타그램이 잠시 막았을 수 있습니다."),
+    ("There is no video in this post", "이 게시물에는 영상이 없습니다."),
     ("Unable to download webpage", "인터넷 연결을 확인하세요."),
 ]
 
@@ -75,10 +77,21 @@ def info(url):
     if proc.returncode != 0:
         raise RuntimeError(_error_text(proc.stderr))
     data = json.loads(proc.stdout)
-    if data.get("is_live") or not data.get("duration"):
+    if data.get("_type") == "playlist":
+        raise RuntimeError("영상이 여러 개인 게시물입니다. 영상 하나의 링크를 넣어 주세요.")
+    site = data.get("extractor_key") or ""
+    youtube = site == "Youtube"
+    if data.get("is_live") or (youtube and not data.get("duration")):
         raise RuntimeError("생방송이나 길이를 알 수 없는 영상은 받을 수 없습니다.")
-    return {"id": data["id"], "title": data.get("title") or data["id"], "duration": data["duration"],
-            "uploader": data.get("uploader") or "", "url": data.get("webpage_url") or url}
+    # 유튜브가 아니면 화면에서 유튜브 플레이어 대신 받아 둔 미리보기 영상을 쓴다.
+    # 인스타그램은 길이를 알려 주지 않아(0) 미리보기 영상을 받은 뒤 화면이 길이를 읽는다
+    vid = data["id"] if youtube else f"{site.lower() or 'web'}_{data['id']}"
+    title = data.get("title") or data["id"]
+    if site == "Instagram" and title.startswith("Video by ") and data.get("description"):
+        title = data["description"].strip().splitlines()[0][:60] or title  # "Video by 아이디"보다 글 첫 줄이 알아보기 쉽다
+    return {"id": vid, "title": title, "duration": data.get("duration") or 0, "youtube": youtube,
+            "site": "유튜브" if youtube else ("인스타그램" if site == "Instagram" else site),
+            "uploader": data.get("uploader") or data.get("channel") or "", "url": data.get("webpage_url") or url}
 
 
 def _stamp(sec):
