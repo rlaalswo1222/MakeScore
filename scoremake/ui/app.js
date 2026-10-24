@@ -715,9 +715,17 @@ function makeNote(c, d, clef, key, stem=0, ghost=false){
   return sn;
 }
 
+/* 마디 중간 음자리표가 들어가는 자리(그 뒤 첫 음표·쉼표의 틱). 바뀌지 않으면 null */
+const clefTickOf = st => { if (!st.change) return null; const it = st.voices[0].items.find(x => x.s >= st.change.tick); return it ? it.s : null; };
+/* 보이지 않는 음자리표: 다른 보표·성부에 음자리표가 들어가는 박에서 같은 폭을 비워, 같은 박의 음표가 세로로 맞게 한다
+ * (음자리표는 그 박의 음표를 오른쪽으로 미는데, 음자리표가 없는 쪽 음표는 그대로라 어긋난다) */
+let CLEF_SPACERS = true;   // 점검용 (__dev.clefAlign(false)로 끄고 비교)
+function clefSpacer(clef){ const n = new VF.ClefNote(clef, 'small'); n.draw = function(){ this.setRendered(); }; return n; }
+
 /* staff: {clef, change} — 마디 중간에 음자리표가 바뀌면 그 뒤 음표는 새 음자리표로 그린다.
- * showClef: 이 성부에 바뀌는 자리의 작은 음자리표를 넣을지 (보표당 한 성부만) */
-function buildVoice(items, staff, trip, key, ts, stem=0, ghost=false, showClef=false){
+ * showClef: 이 성부에 바뀌는 자리의 작은 음자리표를 넣을지 (보표당 한 성부만)
+ * spacers: 보이지 않는 음자리표를 넣을 틱들, 오름차순 (다른 성부에 음자리표가 들어가는 자리) */
+function buildVoice(items, staff, trip, key, ts, stem=0, ghost=false, showClef=false, spacers=[]){
   const notes=[], tiePairs=[], groups=[], runs=[[]], hits=[], at=[];
   let curTrip=-1, tieFrom=null, tieIn=null, clefShown=false;
   for (const it of items){
@@ -728,6 +736,8 @@ function buildVoice(items, staff, trip, key, ts, stem=0, ghost=false, showClef=f
     }
     let tk = it.s;
     ps.forEach((pc,k) => {
+      // 음자리표가 들어간 박 이후 첫 조각 앞에 (그 박에 걸쳐 이어지는 음이면 다음 조각 앞에). 음자리표 뒤로는 그 보표가 계속 밀리기 때문
+      while (spacers.length && tk >= spacers[0]){ notes.push(clefSpacer(clef)); spacers = spacers.slice(1); }
       const sn = makeNote(it.c, pc.d, clef, key, stem, (ghost || it.ghost) && !pc.trip);
       at.push({tick:tk, sn}); tk += pc.ticks;
       if (k===0 && it.c && it.s===it.c.start){
@@ -805,7 +815,11 @@ function systemLayout(lines, flats){
 
 /* 한 마디의 성부들을 만든다 (그리기 전에 폭을 재는 데도 쓴다) */
 function buildMeasure(m, key, ts){
-  const staffVoices = h => m[h].voices.map((v,idx) => buildVoice(v.items, m[h], A.trip[h], key, ts, v.stem, v.ghost, idx===0));
+  const clefTicks = CLEF_SPACERS ? ['R','L'].map(h => clefTickOf(m[h])).filter(t => t!==null) : [];
+  const staffVoices = h => m[h].voices.map((v,idx) => {
+    const own = idx===0 ? clefTickOf(m[h]) : null;   // 진짜 음자리표를 넣는 성부는 그 자리에 빈칸이 필요 없다
+    return buildVoice(v.items, m[h], A.trip[h], key, ts, v.stem, v.ghost, idx===0, clefTicks.filter(t => t!==own).sort((a,b) => a-b));
+  });
   const vR = staffVoices('R'), vL = staffVoices('L');
   VF.Accidental.applyAccidentals(vR.map(v => v.voice), key.id);   // 같은 보표의 두 성부는 임시표를 함께 따진다
   VF.Accidental.applyAccidentals(vL.map(v => v.voice), key.id);
@@ -1946,6 +1960,19 @@ window.__dev = {printPages, musicXml, ytRange:(a,b) => { ytSet('end',b); ytSet('
   chords:(b0=0, b1=1e9) => JSON.stringify(A.chords.filter(c => c.tick>=b0*TPB && c.tick<b1*TPB).map(c => [c.tick/TPB, chordName(c, A.key), !!c.fix])),
   chordPop:k => { openChordPop(k, 400, 300); return `${chordHits.length} hits, ${chordRows.length} rows`; },
   chordFix:() => JSON.stringify(S.chordFix), undo,
+  // 마디 중간 음자리표가 있는 마디마다 그려 보고, 같은 박에 시작하는 음표들의 가로 위치 차이(px)가 큰 것
+  clefAlign:(spacers=true, only=0) => { const out = [], box = document.createElement('div'); document.body.appendChild(box); CLEF_SPACERS = spacers;
+    try { A.measures.forEach((m,i) => { if ((!m.R.change && !m.L.change) || (only && i+1!==only)) return;
+      box.innerHTML = ''; const r = new VF.Renderer(box, VF.Renderer.Backends.SVG); r.resize(600, 300); const ctx = r.getContext();
+      const sT = new VF.Stave(0,0,500), sB = new VF.Stave(0,120,500); sT.setContext(ctx).draw(); sB.setContext(ctx).draw();
+      const {vR, vL, fmt} = buildMeasure(m, A.key, S.ts); fmt.format([...vR, ...vL].map(v => v.voice), 400);
+      vR.forEach(v => v.voice.draw(ctx,sT)); vL.forEach(v => v.voice.draw(ctx,sB));
+      // 보표마다 첫 성부만 비교한다 (같은 보표의 두 성부는 겹치지 않게 일부러 옆으로 비켜 그린다)
+      const byTick = new Map(); [vR[0], vL[0]].forEach(v => v.at.forEach(a => { if (!byTick.has(a.tick)) byTick.set(a.tick, []); byTick.get(a.tick).push(a.sn.getAbsoluteX()); }));
+      let worst = 0; byTick.forEach(xs => { worst = Math.max(worst, Math.max(...xs) - Math.min(...xs)); });
+      out.push(only ? [...byTick].sort((a,b) => a[0]-b[0]).map(([t,xs]) => `${t}:${xs.map(Math.round).join('/')}`).join(' ') : [i+1, Math.round(worst)]); });
+    } finally { box.remove(); CLEF_SPACERS = true; }
+    return JSON.stringify(out); },
   // 재생 속도와 영상의 실제 재생 속도
   rate:() => JSON.stringify({rate, playbackRate:media().playbackRate, defaultRate:media().defaultPlaybackRate, preservesPitch:media().preservesPitch, select:$('#rate').value}),
   // 들을 손·소리와 재생할 음의 손 분포
