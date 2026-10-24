@@ -25,8 +25,8 @@ function devApi(){
 }
 
 /* ---------- 상태 ---------- */
-const SETTINGS = ['bpm','autoBpm','offset','follow','ts','key','grid','triplet','noteLen','fill','graces','voices','chords','chordFix','handMode','minVel','minConf','split','zoom'];
-const DEFAULTS = {key:'auto', ts:'4/4', grid:3, triplet:true, noteLen:'key', fill:6, graces:true, voices:true, chords:true, chordFix:[], handMode:'auto', minVel:12, minConf:0.6, split:60, follow:true};
+const SETTINGS = ['bpm','autoBpm','offset','follow','ts','key','grid','triplet','noteLen','fill','graces','arpeggio','voices','chords','chordFix','handMode','minVel','minConf','split','zoom'];
+const DEFAULTS = {key:'auto', ts:'4/4', grid:3, triplet:true, noteLen:'key', fill:6, graces:true, arpeggio:true, voices:true, chords:true, chordFix:[], handMode:'auto', minVel:12, minConf:0.6, split:60, follow:true};
 const S = {path:null, name:'', isVideo:true, duration:0, notes:[], pedals:[], result:null,
   bpm:100, autoBpm:100, offset:0, zoom:72, ...DEFAULTS,
   sel:null, source:'raw'};
@@ -63,6 +63,7 @@ let AUTOHAND = new Map();                          // 자동 양손 판정 결�
 const autoHand = n => (S.handMode==='auto' && AUTOHAND.get(n.id)) || (n.p >= S.split ? 'R' : 'L');
 const handOf = n => n.hand || autoHand(n);
 let GRACE = {main:new Map(), ids:new Set()};       // 꾸밈음: 주음 id → [꾸밈음들], 꾸밈음 id 모음
+let ROLLS = new Map();                              // 긁어 친 화음: 음 id → {t: 묶은 시각, dir}
 const needsReview = n => n.c < S.minConf && !n.ok;
 const byId = id => S.notes.find(n => n.id === id);
 
@@ -155,6 +156,40 @@ function pedalEnd(n){
 const keyLen = () => S.noteLen !== 'sound';
 const soundingEnd = n => keyLen() ? n.t+n.d : pedalEnd(n);
 
+/* 긁어 친 화음(아르페지오): 화음을 아래에서 위로(또는 위에서 아래로) 빠르게 차례로 쳐서, 앞 음을 누른 채 쌓은 것.
+ * 한 화음으로 묶어 같은 박자 칸에 두고 물결선을 붙인다 (따로 쓰면 짧은 음표·붙임줄·두 성부가 얽혀 읽기 어렵다).
+ * 조건: 서로 다른 세 음 넘게, 이웃 간격 ROLL_STEP초 안, 전체 펼침 ROLL_MIN~ROLL_SPAN초, 음높이가 한 방향,
+ * 마지막 음을 칠 때 앞 음이 모두 눌려 있음. 같은 간격으로 더 이어지면 긁기가 아니라 펼친 화음(분산화음) 음형이라 묶지 않는다.
+ * 양손에 걸쳐도 된다. 물결선은 아래에서 위로 ROLL_MARK초 넘게 펼친 것만 붙인다. 위에서 아래로 펼친 것은 대개 오른손이 먼저 치고
+ * 왼손이 살짝 늦은 것이라, ROLL_DOWN초 안이면 한 화음으로 묶기만 하고 그보다 길면 그대로 둔다.
+ * 돌려주는 값: Map(음 id → {t: 묶은 화음을 둘 시각, dir: 1 위로 / -1 아래로, mark: 물결선을 붙일지}) */
+const ROLL_STEP = 0.09, ROLL_SPAN = 0.2, ROLL_MIN = 0.03, ROLL_TOGETHER = 0.025, ROLL_MARK = 0.05, ROLL_DOWN = 0.06;
+function findRolls(vis){
+  const out = new Map();
+  if (!S.arpeggio) return out;
+  const ns = [...vis].sort((a,b) => a.t-b.t || a.p-b.p), cl = [];   // cl: 거의 같이 친 음 묶음
+  for (const n of ns){ const c = cl[cl.length-1]; if (c && n.t - c.t <= ROLL_TOGETHER) c.ns.push(n); else cl.push({t:n.t, ns:[n]}); }
+  const lo = c => Math.min(...c.ns.map(n => n.p)), hi = c => Math.max(...c.ns.map(n => n.p));
+  const G = gridTicks(), qErr = t => { const k = beatPos(t)*TPB; return Math.abs(k - Math.round(k/G)*G); };
+  for (let i=0; i+1<cl.length; i++){
+    for (const dir of [1, -1]){
+      const ok = (a, b) => b.t-a.t <= ROLL_STEP && (dir > 0 ? lo(b) > hi(a) : hi(b) < lo(a));
+      let j = i+1;
+      while (j < cl.length && cl[j].t - cl[i].t <= ROLL_SPAN && ok(cl[j-1], cl[j])) j++;
+      const g = cl.slice(i, j), last = g[g.length-1], span = last.t - g[0].t;
+      if (g.length < 2 || span < ROLL_MIN || (dir < 0 && span > ROLL_DOWN)) continue;
+      if (j < cl.length && ok(last, cl[j])) continue;                       // 같은 방향으로 더 이어지는 음형
+      const members = g.flatMap(c => c.ns);
+      if (new Set(members.map(n => n.p)).size < 3) continue;
+      if (!g.slice(0, -1).every(c => c.ns.every(n => n.t + n.d >= last.t + 0.02))) continue;   // 앞 음을 누른 채
+      const at = g.reduce((b, c) => qErr(c.t) < qErr(b.t) - 0.5 ? c : b, g[0]).t;   // 박자 칸에 가장 잘 맞는 음의 시각에 둔다
+      members.forEach(n => out.set(n.id, {t:at, dir, mark: dir > 0 && span >= ROLL_MARK}));
+      i = j - 1; break;
+    }
+  }
+  return out;
+}
+
 /* 꾸밈음: 아주 짧은 음이 같은 손의 더 긴 음 바로 앞에 가까운 음높이로 붙어 있으면 꾸밈음으로 본다.
  * 짧은 음이 2~3개 이어진 뒤 주음이 오면 꾸밈음 묶음으로 본다. */
 const GRACE_DUR = 0.13, GRACE_GAP = 0.15, GRACE_STEP = 4;
@@ -162,7 +197,7 @@ function findGraces(vis){
   const main = new Map(), ids = new Set();
   if (!S.graces) return {main, ids};
   for (const h of ['R','L']){
-    const ns = vis.filter(n => handOf(n)===h).sort((a,b) => a.t-b.t || a.p-b.p);
+    const ns = vis.filter(n => handOf(n)===h && !ROLLS.has(n.id)).sort((a,b) => a.t-b.t || a.p-b.p);   // 긁은 화음의 음은 꾸밈음이 아니다
     for (let i=0; i<ns.length; i++){
       const g = ns[i];
       if (g.d > GRACE_DUR || g.noGrace || ids.has(g.id)) continue;
@@ -225,8 +260,15 @@ function chordSpell(key){
   else { N[6] = 'F♯'; if (n >= 2) N[1] = 'C♯'; if (n >= 3) N[8] = 'G♯'; if (n >= 4) N[3] = 'D♯'; if (n >= 5) N[10] = 'A♯'; }
   return N;
 }
+/* 슬래시 코드의 베이스 철자: 화음음이면 근음에서 몇 번째 음인지에 맞춘다 (A7/C♯: A의 3음이라 D♭이 아니라 C♯) */
+const LETTERS = 'CDEFGAB', NATURAL = [0,2,4,5,7,9,11], DEGREE_STEPS = [0,1,1,2,2,3,4,4,4,5,6,6];   // 반음 간격 → 글자 몇 칸 위
+function bassSpell(root, bass, N){
+  const L = LETTERS.indexOf(N[root][0]), letter = (L + DEGREE_STEPS[(bass-root+12)%12]) % 7;
+  const acc = ((bass - NATURAL[letter]) % 12 + 18) % 12 - 6;   // -6~5
+  return acc===0 ? LETTERS[letter] : acc===1 ? LETTERS[letter]+'♯' : acc===-1 ? LETTERS[letter]+'♭' : N[bass];   // 겹올림·겹내림은 피한다
+}
 const chordName = (c, key) => { if (c.label) return c.label; const N = chordSpell(key);
-  return N[c.root] + c.kind + (c.bass!==null && c.bass!==c.root ? '/'+N[c.bass] : ''); };
+  return N[c.root] + c.kind + (c.bass!==null && c.bass!==c.root ? '/'+bassSpell(c.root, c.bass, N) : ''); };
 
 /* 사용자가 적은 코드 이름 → {root, kind, bass, label}. 'Bb7', 'C#m7b5', 'Cmaj7', 'F/A', 'C9'처럼 적어도 된다.
  * 틀에 없는 이름(C9, Cm11 등)은 가장 가까운 틀(7, m7)로 판정에 쓰고, 화면에는 적은 그대로 보여 준다. 알아볼 수 없으면 null */
@@ -367,6 +409,7 @@ function compute(){
   ENV = onsetEnvelope(); trackBeats();
   const vis = S.notes.filter(visible);
   AUTOHAND = S.handMode==='auto' && window.ScoreHands ? ScoreHands.assign(slots(vis), S.split) : new Map();
+  ROLLS = findRolls(vis);
   GRACE = findGraces(vis);
   const G = gridTicks();
   // 함께 친 음(시작이 50ms 안)은 박자 칸에 맞추기 전에 한 묶음으로 만들어 같은 위치에 둔다.
@@ -376,13 +419,16 @@ function compute(){
   const stepAfter = (grp, n) => n.d < 0.15 && grp.some(m => handOf(m)===handOf(n) && Math.abs(m.p-n.p) <= 2 && n.t-m.t > 0.02 && m.d < 0.15);
   for (let i=0; i<sorted.length;){
     let j = i+1; while (j<sorted.length && sorted[j].t - sorted[i].t < CHORD_TOGETHER && !stepAfter(sorted.slice(i,j), sorted[j])) j++;
-    const group = sorted.slice(i, j), t = group.reduce((s,n) => s+n.t, 0)/group.length;
+    const group = sorted.slice(i, j), roll = group.find(n => ROLLS.has(n.id));
+    // 긁은 화음에 든 음이 있으면 같이 친 음까지 그 화음 자리로 (따로 두면 같은 칸에 몰린 음으로 보고 밀어낸다)
+    const t = roll ? ROLLS.get(roll.id).t : group.reduce((s,n) => s+n.t, 0)/group.length;
     group.forEach(n => onsetOf.set(n.id, t));
     i = j;
   }
+  ROLLS.forEach((r, id) => { if (onsetOf.has(id)) onsetOf.set(id, r.t); });   // 긁은 화음은 한 순간으로
   const qs = sorted.map(n => {
     const tick = beatPos(onsetOf.get(n.id))*TPB, endTick = beatPos(soundingEnd(n))*TPB, keyUpTick = beatPos(n.t+n.d)*TPB;
-    return {n, h:handOf(n), tick, endTick, keyUpTick, playTick:beatPos(pedalEnd(n))*TPB, qS:Math.round(tick/G)*G, qT:Math.round(tick/TR)*TR, q32:Math.round(tick/T32)*T32, q6:Math.round(tick/T6)*T6, beat:Math.floor((tick+TPB/6)/TPB)};
+    return {n, h:handOf(n), roll:ROLLS.has(n.id) && ROLLS.get(n.id).mark ? 1 : 0, tick, endTick, keyUpTick, playTick:beatPos(pedalEnd(n))*TPB, qS:Math.round(tick/G)*G, qT:Math.round(tick/TR)*TR, q32:Math.round(tick/T32)*T32, q6:Math.round(tick/T6)*T6, beat:Math.floor((tick+TPB/6)/TPB)};
   });
   const trip = {R:new Set(), L:new Set()};
   if (S.triplet && G < TPB){
@@ -541,8 +587,8 @@ function compute(){
   const chordsOf = list => {
     const m = new Map();
     list.forEach(q => { let c=m.get(q.start);
-      if (!c){ c={start:q.start, end:q.end, keyUp:q.keyUp, byP:new Map()}; m.set(q.start,c); }
-      c.byP.set(q.n.p, q.n.id); c.end=Math.max(c.end,q.end); c.keyUp=Math.max(c.keyUp,q.keyUp); });
+      if (!c){ c={start:q.start, end:q.end, keyUp:q.keyUp, byP:new Map(), roll:0}; m.set(q.start,c); }
+      c.byP.set(q.n.p, q.n.id); c.end=Math.max(c.end,q.end); c.keyUp=Math.max(c.keyUp,q.keyUp); if (q.roll) c.roll = q.roll; });
     return [...m.values()].sort((a,b) => a.start-b.start);
   };
   const ch = {};
@@ -563,16 +609,15 @@ function compute(){
       const active = (list, E) => list.some(c => c.start<m1 && E.get(c)>m0);
       const two = S.voices && active(ch[h].v1, ends[h].v1) && active(ch[h].v2, ends[h].v2);
       // 음자리표: 덧줄이 확실히 적어지는 쪽으로만 바꾸고, 필요하면 마디 중간(박 경계)에서 한 번 바꾼다
-      const inMeasure = qs.filter(q => q.h===h && q.start>=m0 && q.start<m1).map(q => ({p:q.n.p, tick:q.start}));
+      // 앞 마디에서 붙임줄로 이어져 들어오는 음도 센다 (그 음도 이 마디에 그려진다)
+      const inMeasure = qs.filter(q => q.h===h && q.start<m1 && Math.max(q.end, q.start+1)>m0).map(q => ({p:q.n.p, tick:Math.max(q.start, m0), end:q.end}));
       const clefs = inMeasure.length ? chooseClefs(inMeasure, clefNow[h], key.flats, m0, BPMEAS[S.ts])
                                      : {start:clefNow[h], change:null};
       clefNow[h] = clefs.change ? clefs.change.clef : clefs.start;
       let voices;
       if (two){
         const v1 = buildItems(ch[h].v1, ends[h].v1, trip[h], m0, m1), v2 = buildItems(ch[h].v2, ends[h].v2, trip[h], m0, m1);
-        // 위 성부의 쉼표도 아래 성부가 소리 내는 동안이거나 한 박보다 짧으면 숨긴다 (음표와 겹치지 않게)
-        v1.forEach(it => { if (!it.c && (it.e-it.s < TPB || v2.some(o => o.c && o.s < it.e && o.e > it.s))) it.ghost = true; });
-        voices = [{items:v1, stem:1}, {items:v2, stem:-1, ghost:true}];
+        voices = [{items:upperRests(v1, v2), stem:1}, {items:v2, stem:-1, ghost:true}];
       } else voices = [{items:buildItems(ch[h].all, ends[h].all, trip[h], m0, m1), stem:0}];
       meas[h] = {clef:clefs.start, change:clefs.change, endClef:clefNow[h], voices};
     }
@@ -580,7 +625,7 @@ function compute(){
   }
   const result = [];
   qs.forEach(q => {
-    const t=timeAt(q.start/TPB);   // 재생은 페달로 울리는 길이까지
+    const t0=timeAt(q.start/TPB), t=ROLLS.has(q.n.id) ? t0 + q.n.t - ROLLS.get(q.n.id).t : t0;   // 재생은 페달로 울리는 길이까지, 긁은 화음은 실제로 긁은 대로
     result.push({t, d:Math.max(0.05, timeAt(Math.max(q.end, q.playTick)/TPB)-t), p:q.n.p, v:q.n.v, h:q.h});
     (GRACE.main.get(q.n.id) || []).forEach(g => result.push({t:t-(q.n.t-g.t), d:g.d, p:g.p, v:g.v, h:q.h}));
   });
@@ -602,7 +647,7 @@ function clefCost(ps, clef, flats){
   return sum + 2*max;
 }
 /* 한 마디의 음자리표: 그대로 / 마디 처음부터 바꾸기 / 마디 중간 박 경계에서 한 번 바꾸기 중 부담이 가장 적은 것.
- * 바꾸는 데도 부담을 매겨 마디마다 오가지 않게 한다. notes: [{p, tick}] */
+ * 바꾸는 데도 부담을 매겨 마디마다 오가지 않게 한다. notes: [{p, tick, end}] */
 const CLEF_SWITCH_COST = 3, CLEF_MID_COST = 4;
 function chooseClefs(notes, prev, flats, m0, beats){
   const other = c => c==='treble' ? 'bass' : 'treble';
@@ -613,6 +658,7 @@ function chooseClefs(notes, prev, flats, m0, beats){
   for (const c0 of ['treble','bass']) for (let k=1; k<beats; k++){
     const t = m0 + k*TPB, a = notes.filter(x => x.tick < t), b = notes.filter(x => x.tick >= t);
     if (!a.length || !b.length) continue;
+    if (notes.some(x => x.tick < t && x.end > t)) continue;   // 붙임줄로 이어지는 음이 걸친 자리에서는 바꾸지 않는다 (음자리표를 넘는 붙임줄은 사선이 된다)
     const c = cost(a,c0) + cost(b,other(c0)) + CLEF_MID_COST + (c0!==prev ? CLEF_SWITCH_COST : 0);
     if (c < best.cost) best = {start:c0, change:{tick:t, clef:other(c0)}, cost:c};
   }
@@ -674,6 +720,22 @@ function buildItems(chs, ends, trip, m0, m1){
   });
   if (pos < m1) push(pos, m1, null);
   return items;
+}
+
+/* 두 성부일 때 위 성부의 쉼표: 아래 성부가 소리 내는 동안만 숨기고(음표와 겹치지 않게), 두 성부가 함께 쉬는 곳은 보이게 한다.
+ * 아래 성부 음의 시작·끝에서 쉼표를 나눈다 (아래 성부의 쉼표는 늘 숨기므로, 함께 쉬는 곳에 쉼표가 하나는 보여야 박이 맞아 보인다) */
+function upperRests(v1, v2){
+  const notes = v2.filter(o => o.c);
+  return v1.flatMap(it => {
+    if (it.c) return [it];
+    const pts = [...new Set([it.s, it.e, ...notes.flatMap(o => [o.s, o.e]).filter(t => t > it.s && t < it.e)])].sort((a,b) => a-b), out = [];
+    for (let k=0; k+1<pts.length; k++){
+      const s = pts[k], e = pts[k+1], ghost = e-s < T32 || notes.some(o => o.s < e && o.e > s);   // 32분음표보다 짧은 조각은 쓸 수 없어 숨긴다
+      const last = out[out.length-1];
+      if (last && last.ghost === ghost) last.e = e; else out.push({s, e, c:null, tie:false, ghost});
+    }
+    return out;
+  });
 }
 
 /* 한 항목을 그릴 음표 길이들로 쪼갠다: [{d:'qd', ticks, trip}] */
@@ -741,6 +803,8 @@ function buildVoice(items, staff, trip, key, ts, stem=0, ghost=false, showClef=f
       const sn = makeNote(it.c, pc.d, clef, key, stem, (ghost || it.ghost) && !pc.trip);
       at.push({tick:tk, sn}); tk += pc.ticks;
       if (k===0 && it.c && it.s===it.c.start){
+        // 긁은 화음: 이 보표에 두 음 넘게 있으면 물결선
+        if (it.c.roll && it.c.byP.size > 1) sn.addStroke(0, new VF.Stroke(VF.Stroke.Type.ARPEGGIO_DIRECTIONLESS));
         const gs = gracesOf(it.c);
         if (gs.length){
           const gn = gs.map(g => {
@@ -780,18 +844,26 @@ function buildVoice(items, staff, trip, key, ts, stem=0, ghost=false, showClef=f
   return {voice, beams, tuplets, ties, hits, at, tieIn, tieOut:tieFrom};
 }
 
-/* 음이 오선 밖으로 얼마나 나가는지(px): 위쪽, 아래쪽. 음자리표마다 오선의 맨 위·아래 줄 위치가 다르다 */
+/* 음이 오선 밖으로 얼마나 나가는지(px): 위쪽, 아래쪽(음표 머리). 음자리표마다 오선의 맨 위·아래 줄 위치가 다르다.
+ * stemAbove·stemBelow: 기둥 끝과 셋잇단 괄호까지 (아래 성부의 아래로 뻗은 기둥이 다음 줄 코드 이름과 겹치지 않게) */
+const STEM_STEPS = 7, TUPLET_PX = 20;   // 기둥 길이 3.5칸(오선 한 칸 = 2스텝), 셋잇단 괄호와 숫자 자리
 function staffReach(m, h, flats){
-  let above = 0, below = 0;
+  let above = 0, below = 0, stemAbove = 0, stemBelow = 0;
   for (const v of m[h].voices) for (const it of v.items){
     if (!it.c) continue;
     const lines = STAFF_LINES[clefAt(m[h], it.s)];
+    const steps = [...it.c.byP.keys()].map(p => staffStep(p, flats));
     for (const p of [...it.c.byP.keys(), ...gracesOf(it.c).map(g => g.p)]){
       const step = staffStep(p, flats);
       above = Math.max(above, (step-lines.top)*5); below = Math.max(below, (lines.bottom-step)*5);
     }
+    // 기둥 방향: 성부가 정한 쪽, 아니면 VexFlow처럼 음들의 가운데가 셋째 줄 아래면 위로
+    const lo = Math.min(...steps), hi = Math.max(...steps), up = v.stem ? v.stem > 0 : (lo+hi)/2 < lines.bottom+4;
+    const tup = A.trip[h].has(Math.floor(it.s/TPB)) ? TUPLET_PX : 0;   // 괄호는 기둥 쪽 (아래 성부면 아래)
+    if (up) stemAbove = Math.max(stemAbove, (hi+STEM_STEPS-lines.top)*5 + (v.stem >= 0 ? tup : 0));
+    else stemBelow = Math.max(stemBelow, (lines.bottom-(lo-STEM_STEPS))*5 + (v.stem < 0 ? tup : 0));
   }
-  return {above, below};
+  return {above, below, stemAbove, stemBelow};
 }
 
 /* 줄마다 보표 위치를 정한다. 음이 오선 밖으로 많이 나가는 줄은 그만큼 위·사이·아래를 넓혀 겹치지 않게 한다.
@@ -801,8 +873,9 @@ function systemLayout(lines, flats){
   const out = []; let cursor = 6;
   for (const ms of lines){
     const r = ms.map(m => staffReach(m,'R',flats)), l = ms.map(m => staffReach(m,'L',flats));
-    const aboveR = Math.max(0, ...r.map(x => x.above)), belowR = Math.max(0, ...r.map(x => x.below));
-    const aboveL = Math.max(0, ...l.map(x => x.above)), belowL = Math.max(0, ...l.map(x => x.below));
+    // 음표 머리 기준에 더해, 기둥·괄호가 그보다 더 나가면 그만큼 (사이 간격은 여유가 있어 일부만 더한다)
+    const aboveR = Math.max(0, ...r.map(x => x.above)), belowR = Math.max(0, ...r.map(x => Math.max(x.below, x.stemBelow - 20)));
+    const aboveL = Math.max(0, ...l.map(x => Math.max(x.above, x.stemAbove - 20))), belowL = Math.max(0, ...l.map(x => Math.max(x.below, x.stemBelow - 12)));
     const room = A.chords.length ? CHORD_ROOM : 0;              // 줄 맨 위 코드 이름 자리
     const yT = cursor + room + Math.max(0, aboveR + 34 - 40);  // 오선 맨 윗줄은 yT+40에 그려진다. 34는 기둥·빔·셋잇단 자리
     const gap = Math.max(50, belowR + aboveL + 56);              // 오른손 맨 아랫줄 ~ 왼손 맨 윗줄
@@ -1023,7 +1096,8 @@ function partXml(items, trip, staff, voice, flats, ghost=false, change=null){
       }
       const stop = tieOpen || (k===0 && !!it.cont), start = k<ps.length-1 || it.tie;
       const ties = (stop?'<tie type="stop"/>':'') + (start?'<tie type="start"/>':'');
-      const tied = (stop||start) ? `<notations>${stop?'<tied type="stop"/>':''}${start?'<tied type="start"/>':''}</notations>` : '';
+      const arp = k===0 && it.s===it.c.start && it.c.roll ? '<arpeggiate/>' : '';
+      const tied = (stop||start||arp) ? `<notations>${stop?'<tied type="stop"/>':''}${start?'<tied type="start"/>':''}${arp}</notations>` : '';
       [...it.c.byP.keys()].sort((a,b)=>a-b).forEach((p,i) => {
         out += `<note>${i?'<chord/>':''}${xmlPitch(p,flats)}<duration>${pc.ticks}</duration>${ties}${tail}${tm}<staff>${staff}</staff>${tied}</note>`;
       });
@@ -1040,7 +1114,7 @@ function harmonyXml(i, key){
   const step = (name, tag) => `<${tag}-step>${name[0]}</${tag}-step>${name.length>1 ? `<${tag}-alter>${name[1]==='♯'?1:-1}</${tag}-alter>` : ''}`;
   return A.chords.filter(c => c.tick>=m0 && c.tick<m0+A.M && c.root!==null).map(c => {
     const lab = c.label && c.label.match(/^([A-G][♭♯]?)(.*?)(?:\/([A-G][♭♯]?))?$/);   // 사용자가 적은 이름은 적은 철자 그대로
-    const rootN = lab ? lab[1] : N[c.root], bassN = lab ? lab[3] : c.bass!==null && c.bass!==c.root ? N[c.bass] : null;
+    const rootN = lab ? lab[1] : N[c.root], bassN = lab ? lab[3] : c.bass!==null && c.bass!==c.root ? bassSpell(c.root, c.bass, N) : null;
     const deg = c.kind==='7sus4' ? '<degree><degree-value>7</degree-value><degree-alter>-1</degree-alter><degree-type>add</degree-type></degree>' : '';
     return `<harmony><root>${step(rootN,'root')}</root><kind text="${xmlEsc(lab ? lab[2] : c.kind)}">${XKIND[c.kind]}</kind>${bassN ? `<bass>${step(bassN,'bass')}</bass>` : ''}${deg}${c.tick>m0 ? `<offset>${c.tick-m0}</offset>` : ''}</harmony>`;
   }).join('');
@@ -1442,7 +1516,7 @@ function renderInspector(){
 function syncControls(){
   $('#bpm').value=S.bpm; $('#bpmNum').value=S.bpm; $('#ts').value=S.ts; $('#grid').value=String(S.grid);
   $('#trip').checked=S.triplet; $('#trip').disabled=S.grid===12; $('#noteLen').value=S.noteLen; $('#fill').value=S.fill;
-  $('#graces').checked=S.graces; $('#voices').checked=S.voices; $('#chords').checked=S.chords; $('#handMode').value=S.handMode; $('#minVel').value=S.minVel; $('#follow').checked=S.follow;
+  $('#graces').checked=S.graces; $('#arpeggio').checked=S.arpeggio; $('#voices').checked=S.voices; $('#chords').checked=S.chords; $('#handMode').value=S.handMode; $('#minVel').value=S.minVel; $('#follow').checked=S.follow;
   $('#minConf').value=Math.round(S.minConf*100); $('#bpmAuto').textContent=`자동 추정값 ${S.autoBpm}로`;
 }
 function renderInfo(){
@@ -1487,6 +1561,7 @@ function bindControls(){
   $('#noteLen').addEventListener('change', e => { S.noteLen=e.target.value; update(); });
   $('#fill').addEventListener('change', e => { S.fill=+e.target.value; update(); });
   $('#graces').addEventListener('change', e => { S.graces=e.target.checked; update(); });
+  $('#arpeggio').addEventListener('change', e => { S.arpeggio=e.target.checked; update(); });
   $('#chords').addEventListener('change', e => { S.chords=e.target.checked; update(); });
   $('#voices').addEventListener('change', e => { S.voices=e.target.checked; update(); });
   $('#handMode').addEventListener('change', e => { S.handMode=e.target.value; syncControls(); update(); });
@@ -1973,6 +2048,12 @@ window.__dev = {printPages, musicXml, ytRange:(a,b) => { ytSet('end',b); ytSet('
       out.push(only ? [...byTick].sort((a,b) => a[0]-b[0]).map(([t,xs]) => `${t}:${xs.map(Math.round).join('/')}`).join(' ') : [i+1, Math.round(worst)]); });
     } finally { box.remove(); CLEF_SPACERS = true; }
     return JSON.stringify(out); },
+  // 긁어 친 화음으로 묶은 곳: [마디, 박, 방향, 펼친 시간(ms), 음(손)]
+  rolls:() => { const by = new Map(); ROLLS.forEach((r, id) => { const n = byId(id); if (!by.has(r.t)) by.set(r.t, {r, ns:[]}); by.get(r.t).ns.push(n); });
+    const bm = BPMEAS[S.ts];
+    return JSON.stringify([...by.values()].sort((x,y) => x.r.t-y.r.t).map(({r, ns}) => { const b = beatPos(r.t), ts = ns.map(n => n.t);
+      return [Math.floor(b/bm)+1, +(b%bm+1).toFixed(2), r.dir > 0 ? '위로' : '아래로', r.mark ? '물결선' : '묶기만', Math.round((Math.max(...ts)-Math.min(...ts))*1000),
+        ns.sort((x,y) => x.t-y.t).map(n => pitchName(n.p, A.key.flats)+handOf(n)).join(' ')]; })); },
   // 재생 속도와 영상의 실제 재생 속도
   rate:() => JSON.stringify({rate, playbackRate:media().playbackRate, defaultRate:media().defaultPlaybackRate, preservesPitch:media().preservesPitch, select:$('#rate').value}),
   // 들을 손·소리와 재생할 음의 손 분포
